@@ -1,13 +1,13 @@
 <div align="center">
 
-# 🎨 Pixelorama-MCP
+# 🦴 Pixelorama-Skeletor-MCP
 
-### Let AI draw pixel art directly inside [Pixelorama](https://www.pixelorama.org/).
+### Let AI draw pixel art — and rig and animate it — directly inside [Pixelorama](https://www.pixelorama.org/).
 
 **For the ones who can imagine it but can't draw it.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/abidoo22/Pixelorama-MCP?style=flat&logo=github)](https://github.com/abidoo22/Pixelorama-MCP/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/TeeboBaggens/pixelorama-skeletor-mcp?style=flat&logo=github)](https://github.com/TeeboBaggens/pixelorama-skeletor-mcp/stargazers)
 [![MCP Server](https://img.shields.io/badge/MCP-Model%20Context%20Protocol-blueviolet)](https://modelcontextprotocol.io/)
 [![Pixelorama](https://img.shields.io/badge/Pixelorama-v1.1.10%20%7C%20v1.2%2B-orange)](https://www.pixelorama.org/)
 [![Node.js](https://img.shields.io/badge/node-%E2%89%A522.13-brightgreen)](https://nodejs.org/)
@@ -16,22 +16,27 @@
 
 <img src="moonlit_sanctuary_3x.png" alt="Moonlit Sanctuary: a pixel art lakeside pagoda under a full moon, drawn by an AI inside Pixelorama" width="100%">
 
-<sub><i>"Moonlit Sanctuary", painted live inside Pixelorama by an LLM via the Pixelorama-MCP toolset.</i></sub>
+<sub><i>"Moonlit Sanctuary", painted live inside Pixelorama by an LLM via the pix-MCP toolset.</i></sub>
 
 </div>
 
 ---
 
-**Pixelorama-MCP** is an open-source [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that seamlessly bridges AI assistants—including **Claude Desktop**, **Cursor**, **Google Antigravity**, **ChatGPT**, **Gemini**, **Qwen**, and custom autonomous agents—directly to **Pixelorama**, the free and open-source pixel art editor built on Godot Engine.
+**Pixelorama-Skeletor-MCP** is an open-source [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that seamlessly bridges AI assistants—including **Claude Desktop**, **Cursor**, **Google Antigravity**, **ChatGPT**, **Gemini**, **Qwen**, and custom autonomous agents—directly to **Pixelorama**, the free and open-source pixel art editor built on Godot Engine.
 
 You describe your creative vision in natural language. The AI computes geometry, palettes, shading math, dithering, and layers, then draws them **live onto your Pixelorama canvas**. Everything created is a native Pixelorama project (`.pxo`) with complete undo history, layer hierarchies, and cel animations that you can continue editing by hand.
 
-> **Note:** This is an independent open-source community project. It is not officially affiliated with or endorsed by Orama Interactive.
+It also drives [**Skeletor**](https://github.com/Variable-Interactive/Skeletor), the skeletal-animation extension for Pixelorama, so an agent can build a bone rig, pose joints by angle and tween poses across frames. Skeletor ships no API and no MCP server of its own — see [Skeletal Animation with Skeletor](#-skeletal-animation-with-skeletor).
+
+> **This is a fork** of [abidoo22/Pixelorama-MCP](https://github.com/abidoo22/Pixelorama-MCP), which is where the drawing toolset and the bridge design come from. It adds the Skeletor tool layer on top, and repairs the bridge against Pixelorama 1.2's sparse cels, which broke drawing, layer naming, frame duplication and export. See [What this fork adds](#-what-this-fork-adds).
+
+> **Note:** This is an independent open-source community project. It is not officially affiliated with or endorsed by Orama Interactive, nor by the authors of Pixelorama-MCP or Skeletor.
 
 ---
 
 ## 📑 Table of Contents
 
+- [🔱 What this fork adds](#-what-this-fork-adds)
 - [🚀 Key Capabilities](#-key-capabilities)
 - [🎮 Example Gallery](#-example-gallery)
 - [⚡ Quick Start](#-quick-start)
@@ -44,6 +49,18 @@ You describe your creative vision in natural language. The AI computes geometry,
 - [🔧 Troubleshooting & FAQ](#-troubleshooting--faq)
 - [🤝 Contributing](#-contributing)
 - [📄 License](#-license)
+
+---
+
+## 🔱 What this fork adds
+
+Relative to [abidoo22/Pixelorama-MCP](https://github.com/abidoo22/Pixelorama-MCP):
+
+- **Skeletal animation via Skeletor** — five new tools (`get_skeletor_state`, `setup_skeletor_rig`, `apply_bone_pose`, `generate_skeletor_tween`, `set_skeletor_mode`). Skeletor has no API, so the bridge drives its manager directly; both are extensions in one Godot process, so **no fork of Skeletor or of Pixelorama is needed**.
+- **Pixelorama 1.2 compatibility** — 1.2 made cels *sparse*, which silently broke the bridge's entire drawing surface (`pixels_drawn: 0, pixels_clipped: N`), stamped every layer at the canvas origin on export, mis-named nested layers, aborted layer and frame commands on read-only properties, and dropped cel metadata when duplicating frames. All fixed and verified live.
+- **Correct symmetry axes** — `set_symmetry_guide` had the axis flags crossed and the point scale wrong; the guides are now also colour-coded so the two can't be confused.
+- **A current toolchain** — Node ≥ 22.13, TypeScript 7, zod 4, eslint 10, and a clean `npm audit`.
+- **Reproducible dev scripts** for macOS, and [integration notes](docs/skeletor-integration.md) documenting Skeletor's data model and every upstream quirk worked around.
 
 ---
 
@@ -131,8 +148,8 @@ Setting up takes under 5 minutes.
 ### 1. Clone & Build the MCP Server
 
 ```bash
-git clone https://github.com/abidoo22/Pixelorama-MCP.git
-cd Pixelorama-MCP/mcp-server
+git clone https://github.com/TeeboBaggens/pixelorama-skeletor-mcp.git
+cd pixelorama-skeletor-mcp/mcp-server
 npm install
 npm run build
 ```
@@ -164,7 +181,7 @@ Add this entry to your `claude_desktop_config.json`:
       "command": "node",
       "args": [
         "--max-old-space-size=4096",
-        "/absolute/path/to/Pixelorama-MCP/mcp-server/dist/index.js"
+        "/absolute/path/to/pixelorama-skeletor-mcp/mcp-server/dist/index.js"
       ]
     }
   }
@@ -176,7 +193,7 @@ Add this entry to your `claude_desktop_config.json`:
 1. Open Cursor **Settings → Features → MCP Servers**.
 2. Click **Add New MCP Server**.
 3. Set **Name** to `pixelorama`, **Type** to `command`.
-4. Set **Command** to: `node --max-old-space-size=4096 /absolute/path/to/Pixelorama-MCP/mcp-server/dist/index.js`
+4. Set **Command** to: `node --max-old-space-size=4096 /absolute/path/to/pixelorama-skeletor-mcp/mcp-server/dist/index.js`
 
 Now restart your AI client, open Pixelorama, and give it your first drawing prompt!
 
@@ -220,7 +237,7 @@ The smart asset importer automatically detects solid or gradient backgrounds, ex
                            │  JSON-RPC over stdio (MCP)
                            ▼
 ┌─────────────────────────────────────────────────────────┐
-│             Pixelorama-MCP Server (Node.js)             │
+│         Pixelorama-Skeletor-MCP Server (Node.js)        │
 │   • Schema Coercion & Validation (Zod)                  │
 │   • Mathematical Color & Geometry Helpers               │
 │   • Dynamic GDScript Runtime Wrapper                    │
@@ -246,7 +263,7 @@ All communication occurs locally via `127.0.0.1:7373`. No canvas data is transmi
 
 ## 🛠️ Toolset Overview
 
-Pixelorama-MCP exposes over 70 tools organized by domain:
+Pixelorama-Skeletor-MCP exposes over 75 tools organized by domain:
 
 ### 1. Canvas & Project Management
 - `create_canvas`: Initialize new projects with custom width, height, and fill.
@@ -636,19 +653,36 @@ would run it.
 Contributions are warmly welcome! Whether you want to add new procedural drawing tools, improve Godot integration, or submit artwork prompts:
 
 1. Fork the repository and create a feature branch (`git checkout -b feature/awesome-tool`).
-2. Make your edits and ensure tests pass (`node test_all_fixes.js`).
-3. Submit a Pull Request with a clear description of the enhancement.
+2. Make your edits. With Pixelorama running and the bridge extension enabled, the suites should stay green:
+   ```bash
+   cd mcp-server && npm ci && npm run typecheck && npm run lint && npm run build && cd ..
+   node test_all_tools.js     # 111 MCP tools
+   node test_all_fixes.js     # 29 regression checks
+   node test_suite.js         # 16 end-to-end checks
+   node test_mcp_schemas.js   # 6 schema guards
+   ```
+3. If you touched `pixelorama-plugin/`, repack and reinstall the extension:
+   ```bash
+   PIXELORAMA_SRC=/path/to/pixelorama godot --headless -s pack.gd
+   ./scripts/dev/setup-macos.sh
+   ```
+4. Submit a Pull Request with a clear description of the enhancement.
+
+Fixes that are not Skeletor-specific are worth sending upstream to
+[abidoo22/Pixelorama-MCP](https://github.com/abidoo22/Pixelorama-MCP) as well.
 
 ---
 
 ## 📄 License
 
-Pixelorama-MCP is released under the [MIT License](LICENSE).
+Pixelorama-Skeletor-MCP is released under the [MIT License](LICENSE), as is the upstream project it forks.
 
 ---
 
 ## 🙏 Credits & Acknowledgments
 
+- [Pixelorama-MCP](https://github.com/abidoo22/Pixelorama-MCP) — by [abidoo22](https://github.com/abidoo22). The upstream project this is forked from: the drawing toolset, the HTTP bridge design and the GDScript extension are all its work.
+- [Skeletor](https://github.com/Variable-Interactive/Skeletor) — by [Variable-Interactive](https://github.com/Variable-Interactive). The skeletal-animation extension these tools drive.
 - [Pixelorama](https://www.pixelorama.org/) — Created by Orama Interactive and the open-source community.
 - [Godot Engine](https://godotengine.org/) — The powerhouse game engine behind Pixelorama.
 - [Model Context Protocol](https://modelcontextprotocol.io/) — Created by Anthropic.
@@ -656,5 +690,5 @@ Pixelorama-MCP is released under the [MIT License](LICENSE).
 ---
 
 <div align="center">
-<sub><b>Search Keywords:</b> Pixelorama MCP, Model Context Protocol, Pixel Art AI, Claude Pixel Art, Cursor MCP Pixel Art, Godot Pixel Art, AI Sprite Generator, Pixel Art LLM, Prompt to Pixel Art, Procedural Pixel Art GDScript.</sub>
+<sub><b>Search Keywords:</b> Pixelorama MCP, Skeletor MCP, Model Context Protocol, Pixel Art AI, Skeletal Animation Pixel Art, Sprite Rigging, Claude Pixel Art, Cursor MCP Pixel Art, Godot Pixel Art, AI Sprite Generator, Pixel Art LLM, Prompt to Pixel Art, Procedural Pixel Art GDScript.</sub>
 </div>

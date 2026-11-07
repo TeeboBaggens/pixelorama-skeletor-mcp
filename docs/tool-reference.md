@@ -1,6 +1,6 @@
-# 🛠️ Pixelorama-MCP Tool Reference
+# 🛠️ Pixelorama-Skeletor-MCP Tool Reference
 
-All MCP tools exposed by Pixelorama-MCP. They communicate via HTTP REST on `localhost:7373` to control Pixelorama programmatically.
+All MCP tools exposed by Pixelorama-Skeletor-MCP. They communicate via HTTP REST on `localhost:7373` to control Pixelorama programmatically.
 
 **Quick rule:** Use `draw_pixels` (batch) for all drawing — never `draw_pixel` in a loop.
 

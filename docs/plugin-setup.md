@@ -1,6 +1,6 @@
 # 🔌 Pixelorama Bridge Plugin Setup & Architecture
 
-The **Pixelorama REST Bridge Plugin** is a lightweight Godot-based extension targeting **Pixelorama** that runs a simple local HTTP server inside the Pixelorama environment on port `7373`. It parses JSON commands received from the `Pixelorama-MCP` server over HTTP REST and translates them into Godot API calls via the Pixelorama `ExtensionsApi`.
+The **Pixelorama REST Bridge Plugin** is a lightweight Godot-based extension targeting **Pixelorama** that runs a simple local HTTP server inside the Pixelorama environment on port `7373`. It parses JSON commands received from the `Pixelorama-Skeletor-MCP` server over HTTP REST and translates them into Godot API calls via the Pixelorama `ExtensionsApi`.
 
 This guide documents the layout, compilation process, and troubleshooting mechanisms of the extension.
 
