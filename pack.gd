@@ -20,8 +20,15 @@ func _init():
 	packer.add_file(prefix + "command_handler.gd", plugin_dir + "command_handler.gd")
 
 	# Package GIF exporter shaders to fix root/relative load resolution in Godot 4
-	var similar_shader = "pixelorama-source/addons/gdgifexporter/lookup_similar.gdshader"
-	var color_shader = "pixelorama-source/addons/gdgifexporter/lookup_color.gdshader"
+	# Pixelorama's own source tree supplies the GIF exporter shaders. If they are missing the
+	# packed extension still loads but GIF export breaks, so warn loudly rather than fail quietly.
+	var pixelorama_src = OS.get_environment("PIXELORAMA_SRC")
+	if pixelorama_src == "":
+		pixelorama_src = OS.get_environment("HOME") + "/development/tools/pixelorama"
+	var similar_shader = pixelorama_src + "/addons/gdgifexporter/lookup_similar.gdshader"
+	var color_shader = pixelorama_src + "/addons/gdgifexporter/lookup_color.gdshader"
+	if not FileAccess.file_exists(similar_shader):
+		print("WARNING: GIF shaders not found under ", pixelorama_src, " - GIF export will be broken")
 	if FileAccess.file_exists(similar_shader):
 		packer.add_file("res://lookup_similar.gdshader", similar_shader)
 		packer.add_file("res://addons/gdgifexporter/lookup_similar.gdshader", similar_shader)
@@ -40,13 +47,10 @@ func _init():
 	print("Successfully packed PixMcpBridge.pck")
 
 	# Copy to extension directories
-	var copy_paths = [
-		"pixelorama-plugin/PixMcpBridge.pck",
-		"/home/abido/.local/share/pixelorama/extensions/PixMcpBridge.pck",
-		"/home/abido/.local/share/pixelorama/Extensions/PixMcpBridge.pck",
-		"/home/abido/Downloads/Pixelorama-Linux-64bit/pixelorama_data/Extensions/PixMcpBridge.pck",
-		"/home/abido/Downloads/Pixelorama-Linux-64bit/pixelorama_data/extensions/PixMcpBridge.pck"
-	]
+	var copy_paths = ["pixelorama-plugin/PixMcpBridge.pck"]
+	var ext_dir = OS.get_environment("PIXELORAMA_EXT_DIR")
+	if ext_dir != "":
+		copy_paths.append(ext_dir + "/PixMcpBridge.pck")
 	var src = FileAccess.open("PixMcpBridge.pck", FileAccess.READ)
 	if src:
 		var bytes = src.get_buffer(src.get_length())

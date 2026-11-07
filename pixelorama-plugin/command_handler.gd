@@ -253,6 +253,61 @@ func _get_current_image() -> Image:
 	return cel.get_image().duplicate()
 
 
+## The cel's position on the canvas (see _ensure_full_canvas_cel).
+func _cel_offset(cel) -> Vector2i:
+	if cel != null and "offset" in cel:
+		return cel.offset
+	return Vector2i.ZERO
+
+
+## Pixelorama 1.2+ cels are sparse: `cel.image` holds only the used content, positioned on the
+## canvas by `cel.offset`, and an empty cel is a 1x1 placeholder. Every tool here works in canvas
+## coordinates, so cels are normalised to a full-canvas image at offset zero before being read or
+## written. Without this, writes land outside the 1x1 image and every pixel is silently clipped.
+func _ensure_full_canvas_cel(project, cel) -> void:
+	if project == null or cel == null or not cel.has_method("get_image"):
+		return
+	var img: Image = cel.get_image()
+	if img == null:
+		return
+	var target := Vector2i(int(project.size.x), int(project.size.y))
+	var offset := _cel_offset(cel)
+	if img.get_size() == target and offset == Vector2i.ZERO:
+		return
+	if not cel.has_method("resize_cel_image"):
+		return
+	cel.resize_cel_image(target, offset)
+	if "offset" in cel:
+		cel.offset = Vector2i.ZERO
+	if cel.has_method("update_texture"):
+		cel.update_texture()
+
+
+## Adds a layer and returns its real index, or -1.
+## ExtensionsApi.add_new_layer() renames project.layers[above_layer + 1], which assumes the new
+## layer lands above the anchor. That holds only when it does NOT nest into a group: when it does,
+## it is inserted AT above_layer and the group shifts up, so the rename lands on the group instead.
+## Add the layer unnamed, then rename whichever layer actually appeared.
+func _add_layer_safely(project, above_layer: int, layer_name: String, type: int) -> int:
+	var seen := []
+	for l in project.layers:
+		seen.append(l)
+	_api.project.add_new_layer(above_layer, "", type)
+	var created = null
+	for l in project.layers:
+		if not seen.has(l):
+			created = l
+			break
+	if created == null:
+		return -1
+	if layer_name != "":
+		created.name = layer_name
+	for i in range(project.layers.size()):
+		project.layers[i].index = i
+	project.order_layers()
+	return project.layers.find(created)
+
+
 func _get_target_cel_and_image(params: Dictionary) -> Dictionary:
 	var project = _api.project.current_project
 	if project == null:
@@ -269,6 +324,8 @@ func _get_target_cel_and_image(params: Dictionary) -> Dictionary:
 	var cel = project.frames[frame_idx].cels[layer_idx]
 	if cel == null or cel.get_class_name() != "PixelCel":
 		return {"error": "Cel at [frame:%d, layer:%d] is not a PixelCel" % [frame_idx, layer_idx], "image": null, "frame": frame_idx, "layer": layer_idx}
+
+	_ensure_full_canvas_cel(project, cel)
 
 	return {"error": "", "image": cel.get_image().duplicate(), "frame": frame_idx, "layer": layer_idx, "cel": cel}
 
@@ -293,6 +350,8 @@ func _commit_image_change(image: Image, action_name: String, frame_idx: int = -1
 	var cel = project.frames[frame_idx].cels[layer_idx]
 	if cel == null or cel.get_class_name() != "PixelCel":
 		return
+
+	_ensure_full_canvas_cel(project, cel)
 
 	var cel_image: Image = cel.get_image()
 	image.convert(project.get_image_format())
@@ -2097,18 +2156,12 @@ func _cmd_add_layer(params: Dictionary) -> Dictionary:
 	if above_layer < 0 or above_layer >= project.layers.size():
 		return {"success": false, "error": "Invalid above_layer index: %d" % above_layer}
 
-	_api.project.add_new_layer(above_layer, layer_name, type)
-
-	# Ensure all layer.index properties are strictly synchronized
-	for i in range(project.layers.size()):
-		project.layers[i].index = i
-	project.order_layers()
+	var new_layer_idx := _add_layer_safely(project, above_layer, layer_name, type)
+	if new_layer_idx < 0:
+		return {"success": false, "error": "Failed to add layer"}
 	if project.has_signal("layers_updated"):
 		project.layers_updated.emit()
-
-	var new_layer_idx := above_layer + 1
 	project.current_layer = clampi(new_layer_idx, 0, project.layers.size() - 1)
-	_api.project.current_layer = project.current_layer
 	_api.project.select_cels([[project.current_frame, project.current_layer]])
 
 	var canvas = _api.general.get_canvas()
@@ -2152,7 +2205,6 @@ func _cmd_delete_layer(params: Dictionary) -> Dictionary:
 
 	project.remove_layers(PackedInt32Array([layer_index]))
 	project.current_layer = clampi(project.current_layer, 0, project.layers.size() - 1)
-	_api.project.current_layer = project.current_layer
 	_api.project.select_cels([[project.current_frame, project.current_layer]])
 
 	# Ensure all layer.index properties are strictly synchronized
@@ -2512,6 +2564,15 @@ func _cmd_duplicate_frame(params: Dictionary) -> Dictionary:
 			new_cel.link_set = src_cel.link_set
 		else:
 			new_cel.set_content(src_cel.copy_content())
+
+		# duplicate_cel() copies neither the sparse-cel offset nor cel metadata. Extensions
+		# keep per-frame state in metadata -- Skeletor stores each frame's whole skeleton under
+		# "SkeletorSkeleton" on the pose layer's cel -- so without this a duplicated frame
+		# silently loses its pose data.
+		if "offset" in src_cel and "offset" in new_cel:
+			new_cel.offset = src_cel.offset
+		for meta_key in src_cel.get_meta_list():
+			new_cel.set_meta(meta_key, src_cel.get_meta(meta_key))
 
 		if new_cel.get_class_name() == "PixelCel":
 			var img: Image = new_cel.get_image()
@@ -4000,7 +4061,6 @@ func _cmd_merge_layers(params: Dictionary) -> Dictionary:
 
 	project.remove_layers(PackedInt32Array([src_idx]))
 	project.current_layer = clampi(dst_idx, 0, project.layers.size() - 1)
-	_api.project.current_layer = project.current_layer
 	_api.project.select_cels([[project.current_frame, project.current_layer]])
 
 	var canvas = _api.general.get_canvas()
@@ -4027,18 +4087,12 @@ func _cmd_create_layer_group(params: Dictionary) -> Dictionary:
 	var above_layer: int = int(params.get("above_layer", project.layers.size() - 1))
 	above_layer = clampi(above_layer, 0, project.layers.size() - 1)
 
-	_api.project.add_new_layer(above_layer, group_name, 1)
-
-	# Ensure all layer.index properties are strictly synchronized
-	for i in range(project.layers.size()):
-		project.layers[i].index = i
-	project.order_layers()
+	var new_layer_idx := _add_layer_safely(project, above_layer, group_name, 1)
+	if new_layer_idx < 0:
+		return {"success": false, "error": "Failed to create layer group"}
 	if project.has_signal("layers_updated"):
 		project.layers_updated.emit()
-
-	var new_layer_idx := above_layer + 1
 	project.current_layer = clampi(new_layer_idx, 0, project.layers.size() - 1)
-	_api.project.current_layer = project.current_layer
 	_api.project.select_cels([[project.current_frame, project.current_layer]])
 
 	var canvas = _api.general.get_canvas()
@@ -4885,9 +4939,9 @@ func _composite_frame_layers(project, frame_idx: int) -> Image:
 					if col.a > 0.001:
 						col.a *= final_opacity
 						src.set_pixel(x, y, col)
-			blended.blend_rect(src, Rect2i(Vector2i.ZERO, src.get_size()), Vector2i.ZERO)
+			blended.blend_rect(src, Rect2i(Vector2i.ZERO, src.get_size()), _cel_offset(cel))
 		else:
-			blended.blend_rect(cel_img, Rect2i(Vector2i.ZERO, cel_img.get_size()), Vector2i.ZERO)
+			blended.blend_rect(cel_img, Rect2i(Vector2i.ZERO, cel_img.get_size()), _cel_offset(cel))
 
 	return blended
 
