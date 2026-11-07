@@ -461,11 +461,12 @@ export function registerAiHelperTools(server: McpServer): void {
       style: z.string().default("night").describe("Atmospheric style / lighting mood — e.g. 'night', 'cyberpunk', 'sunset', 'forest', 'desert'"),
       horizon_ratio: coerceFloat(0.1, 0.9).default(0.6).describe("Horizon height ratio (0.33 = high sky, 0.5 = center, 0.6 = lower third golden ratio)"),
     },
-    async ({ description, width, height, style, horizon_ratio }) => {
+    // `style` is accepted (and documented) but this plan is style-agnostic: it only derives
+    // framing from the dimensions. It is left in the schema so callers need not special-case it.
+    async ({ description, width, height, horizon_ratio }) => {
       const horizonY = Math.round(height * horizon_ratio);
       const skyHeight = horizonY;
       const groundHeight = height - horizonY;
-      const paletteKey = matchPalette(style);
 
       let plan = `# 🏞️ Scene Composition Plan: "${description}"\n\n`;
       plan += `## 📐 Framing & Canvas Dimensions\n`;

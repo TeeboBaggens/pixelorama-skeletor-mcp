@@ -10,6 +10,10 @@ extends RefCounted
 
 var _api: Node = null
 
+## Skeletor bridge (skeletor_adapter.gd). The only object in this handler that knows anything
+## about the Skeletor extension; null-safe when Skeletor is not installed.
+var _skeletor: RefCounted = null
+
 const LOG_TAG: String = "[pix-MCP] "
 
 ## Map of tool_name -> Callable
@@ -18,6 +22,8 @@ var _tool_registry: Dictionary = {}
 
 func initialize(api: Node) -> void:
 	_api = api
+	_skeletor = preload("skeletor_adapter.gd").new()
+	_skeletor.initialize(api)
 	_register_tools()
 
 
@@ -130,6 +136,13 @@ func _register_tools() -> void:
 	_tool_registry["deselect"] = Callable(self, "_cmd_deselect")
 	_tool_registry["validate_sprite"] = Callable(self, "_cmd_validate_sprite")
 	_tool_registry["get_history"] = Callable(self, "_cmd_get_history")
+
+	# Skeletor (skeletal animation extension)
+	_tool_registry["get_skeletor_state"] = Callable(self, "_cmd_get_skeletor_state")
+	_tool_registry["setup_skeletor_rig"] = Callable(self, "_cmd_setup_skeletor_rig")
+	_tool_registry["apply_bone_pose"] = Callable(self, "_cmd_apply_bone_pose")
+	_tool_registry["generate_skeletor_tween"] = Callable(self, "_cmd_generate_skeletor_tween")
+	_tool_registry["set_skeletor_mode"] = Callable(self, "_cmd_set_skeletor_mode")
 
 	print(LOG_TAG + "Registered %d tools" % _tool_registry.size())
 
@@ -2518,7 +2531,10 @@ func _cmd_delete_frame(params: Dictionary) -> Dictionary:
 
 	project.remove_frames(PackedInt32Array([frame_index]))
 	project.current_frame = clampi(project.current_frame, 0, project.frames.size() - 1)
-	_api.project.current_frame = project.current_frame
+	# ProjectAPI exposes no writable `current_frame` (current_project is its only setter), so
+	# assigning one raised and aborted the command after the frame was already deleted, returning
+	# nothing to the caller. The line above sets it on the project directly, as `current_layer`
+	# is handled elsewhere.
 	_api.project.select_cels([[project.current_frame, project.current_layer]])
 
 	return {
@@ -4823,7 +4839,9 @@ func _cmd_set_tile_mode(params: Dictionary) -> Dictionary:
 		"y", "vertical": mode_int = 3
 		_: mode_int = 1
 
-	project.tile_mode = mode_int
+	# Pixelorama 1.2 moved tile mode off Project and onto Project.tiles (Classes/Tiles.gd).
+	# Tiles.MODE is {NONE, BOTH, X_AXIS, Y_AXIS} = 0..3, which matches mode_int above.
+	project.tiles.mode = mode_int
 	var canvas = _api.general.get_canvas()
 	if canvas:
 		canvas.queue_redraw()
@@ -4841,8 +4859,13 @@ func _cmd_set_symmetry_guide(params: Dictionary) -> Dictionary:
 	var x_pos: int = int(params.get("x_pos", int(project.size.x / 2)))
 	var y_pos: int = int(params.get("y_pos", int(project.size.y / 2)))
 
-	project.show_x_symmetry = horiz
-	project.show_y_symmetry = vert
+	# KNOWN BROKEN against Pixelorama 1.2. `show_x_symmetry`/`show_y_symmetry` no longer exist on
+	# Project: visibility now lives on the SymmetryGuide nodes (`project.x_symmetry_axis.visible`,
+	# gated by `Global.show_x_symmetry_axis and Global.show_guides`) while the mirroring itself is
+	# `Tools.horizontal_mirror`/`vertical_mirror`. Migrating needs a call on which axis "horizontal"
+	# names -- upstream's horizontal mirror drives the *y* axis guide -- so it is left to a
+	# maintainer rather than guessed at here, since a wrong guess silently flips a user-facing axis.
+	# The symmetry points below still exist and are set; only the visibility toggles are missing.
 	project.x_symmetry_point = x_pos
 	project.y_symmetry_point = y_pos
 
@@ -4850,7 +4873,19 @@ func _cmd_set_symmetry_guide(params: Dictionary) -> Dictionary:
 	if canvas:
 		canvas.queue_redraw()
 
-	return {"success": true, "data": {"horizontal": horiz, "vertical": vert, "x_symmetry": x_pos, "y_symmetry": y_pos}}
+	return {
+		"success": true,
+		"data": {
+			"horizontal": horiz,
+			"vertical": vert,
+			"x_symmetry": x_pos,
+			"y_symmetry": y_pos,
+			"warning": (
+				"Symmetry points were set but the guides were not toggled: Pixelorama 1.2 moved "
+				+ "that onto the SymmetryGuide nodes and the Tools autoload. See the handler."
+			)
+		}
+	}
 
 
 func _cmd_set_onion_skinning(params: Dictionary) -> Dictionary:
@@ -5779,4 +5814,550 @@ func _cmd_eval_gdscript(params: Dictionary) -> Dictionary:
 	}
 
 
+# ==============================================================================
+# Skeletor (skeletal animation extension)
+#
+# Everything that touches Skeletor itself goes through _skeletor (skeletor_adapter.gd).
+# The tools below are the parts Skeletor keeps in its tool UI and therefore cannot be driven
+# headlessly -- rig construction, posing, tweening and view switching -- reimplemented over the
+# adapter's primitives. See docs/skeletor-integration.md.
+# ==============================================================================
 
+## Godot easing curves exposed by generate_skeletor_tween. Upstream Skeletor hardcodes
+## TRANS_LINEAR / EASE_IN; reimplementing the loop is what makes these selectable at all.
+const SKELETOR_TRANSITIONS: Dictionary = {
+	"linear": Tween.TRANS_LINEAR,
+	"sine": Tween.TRANS_SINE,
+	"quad": Tween.TRANS_QUAD,
+	"cubic": Tween.TRANS_CUBIC,
+	"quart": Tween.TRANS_QUART,
+	"quint": Tween.TRANS_QUINT,
+	"expo": Tween.TRANS_EXPO,
+	"circ": Tween.TRANS_CIRC,
+	"back": Tween.TRANS_BACK,
+	"elastic": Tween.TRANS_ELASTIC,
+	"bounce": Tween.TRANS_BOUNCE,
+	"spring": Tween.TRANS_SPRING,
+}
+
+const SKELETOR_EASINGS: Dictionary = {
+	"in": Tween.EASE_IN,
+	"out": Tween.EASE_OUT,
+	"in_out": Tween.EASE_IN_OUT,
+	"out_in": Tween.EASE_OUT_IN,
+}
+
+
+# ─────────────────────────────────────────────
+# Skeletor helpers
+# ─────────────────────────────────────────────
+
+## Resolves the active project and confirms Skeletor is usable.
+## Returns {"error": "..."} or {"project": project}.
+func _skeletor_context() -> Dictionary:
+	var project = _api.project.current_project
+	if project == null:
+		return {"error": "No active project"}
+	var reason: String = _skeletor.unavailable_reason()
+	if reason != "":
+		return {"error": reason}
+	return {"project": project}
+
+
+func _skeletor_parse_vec2(value, fallback: Vector2) -> Vector2:
+	if value is Dictionary:
+		return Vector2(float(value.get("x", fallback.x)), float(value.get("y", fallback.y)))
+	if value is Array and value.size() >= 2:
+		return Vector2(float(value[0]), float(value[1]))
+	return fallback
+
+
+## Adds a layer with explicit control over whether it nests into the anchor group.
+##
+## AnimationTimeline.add_layer() decides nesting from the anchor layer's `expanded` flag: an
+## expanded GroupLayer anchor adopts the new layer as a child, anything else makes it a sibling.
+## _add_layer_safely() cannot express that choice, which rig building needs for every bone, so this
+## variant toggles `expanded` around the call and restores it. Like _add_layer_safely() it adds the
+## layer unnamed and renames whichever layer actually appeared, working around the upstream
+## add_new_layer() rename landing on the wrong index when a layer nests.
+func _skeletor_add_layer(project, anchor_idx: int, nest: bool, layer_name: String, type: int) -> Dictionary:
+	if anchor_idx < 0 or anchor_idx >= project.layers.size():
+		return {"error": "Anchor layer index out of bounds: %d" % anchor_idx}
+	var anchor = project.layers[anchor_idx]
+	var anchor_is_group: bool = anchor.get_layer_type() == _api.tools.LayerTypes.GROUP
+	var previous_expanded := true
+	if anchor_is_group:
+		previous_expanded = anchor.expanded
+		anchor.expanded = nest
+
+	var seen := []
+	for l in project.layers:
+		seen.append(l)
+	_api.project.add_new_layer(anchor_idx, "", type)
+	var created = null
+	for l in project.layers:
+		if not seen.has(l):
+			created = l
+			break
+
+	if anchor_is_group:
+		anchor.expanded = previous_expanded
+	if created == null:
+		return {"error": "Layer creation failed (anchor %d, type %d)" % [anchor_idx, type]}
+
+	if layer_name != "":
+		created.name = layer_name
+	for i in range(project.layers.size()):
+		project.layers[i].index = i
+	project.order_layers()
+	return {"layer": created, "index": project.layers.find(created)}
+
+
+## Anchor index that yields a parentless layer.
+##
+## add_layer() copies the anchor's own parent when the anchor is not an expanded group, so a
+## top-level non-group layer gives parent == null. Falling back to the topmost layer also works,
+## because there is then no layer above to inherit a parent from.
+func _skeletor_root_anchor(project) -> int:
+	for i in range(project.layers.size()):
+		var layer = project.layers[i]
+		if layer.get_layer_type() != _api.tools.LayerTypes.GROUP and layer.parent == null:
+			return i
+	return project.layers.size() - 1
+
+
+func _skeletor_layer_index_by_name(project, layer_name: String) -> int:
+	for i in range(project.layers.size()):
+		if str(project.layers[i].name) == layer_name:
+			return i
+	return -1
+
+
+## First frame that already carries a skeleton, or -1.
+func _skeletor_source_frame(project) -> int:
+	if not _skeletor.bones_at(project, project.current_frame).is_empty():
+		return project.current_frame
+	for frame_idx in range(project.frames.size()):
+		if not _skeletor.bones_at(project, frame_idx).is_empty():
+			return frame_idx
+	return -1
+
+
+## Makes sure every frame has a skeleton, copying from one that does. Returns the frames seeded.
+func _skeletor_ensure_skeletons(project) -> Array:
+	var source := _skeletor_source_frame(project)
+	if source < 0:
+		return []
+	return _skeletor.seed_frames_from(project, source)
+
+
+# ─────────────────────────────────────────────
+# get_skeletor_state
+# ─────────────────────────────────────────────
+
+func _cmd_get_skeletor_state(params: Dictionary) -> Dictionary:
+	var project = _api.project.current_project
+	var probe: Dictionary = _skeletor.probe()
+	var data := {
+		"installed": probe["installed"],
+		"adapter_ok": probe["ok"],
+		"missing_methods": probe["missing_methods"],
+		"missing_properties": probe["missing_properties"],
+	}
+	if not probe["ok"]:
+		data["reason"] = _skeletor.unavailable_reason()
+		return {"success": true, "data": data}
+	if project == null:
+		data["reason"] = "No active project"
+		return {"success": true, "data": data}
+
+	var frame_idx: int = int(params.get("frame", project.current_frame))
+	if frame_idx < 0 or frame_idx >= project.frames.size():
+		return {"success": false, "error": "Frame index out of bounds: %d (0..%d)" % [frame_idx, project.frames.size() - 1]}
+
+	var pose_layer = _skeletor.pose_layer(project)
+	data["pose_layer"] = str(pose_layer.name) if pose_layer != null else null
+	data["pose_layer_index"] = project.layers.find(pose_layer) if pose_layer != null else -1
+	data["mode"] = _skeletor.view_mode(project)
+	data["frame"] = frame_idx
+	data["frame_count"] = project.frames.size()
+
+	var bones: Dictionary = _skeletor.bones_at(project, frame_idx)
+	var bone_rows := []
+	for bone_name in bones.keys():
+		var row: Dictionary = _skeletor.describe_bone(bones[bone_name])
+		row["layer_index"] = _skeletor_layer_index_by_name(project, str(bone_name))
+		bone_rows.append(row)
+	data["bones"] = bone_rows
+
+	var frames_without_skeleton := []
+	for f in range(project.frames.size()):
+		if _skeletor.bones_at(project, f).is_empty():
+			frames_without_skeleton.append(f)
+	data["frames_without_skeleton"] = frames_without_skeleton
+	return {"success": true, "data": data}
+
+
+# ─────────────────────────────────────────────
+# setup_skeletor_rig
+# ─────────────────────────────────────────────
+
+func _cmd_setup_skeletor_rig(params: Dictionary) -> Dictionary:
+	var ctx := _skeletor_context()
+	if ctx.has("error"):
+		return {"success": false, "error": ctx["error"]}
+	var project = ctx["project"]
+
+	var bone_specs = params.get("bones", [])
+	if not bone_specs is Array or bone_specs.is_empty():
+		return {"success": false, "error": "Parameter 'bones' must be a non-empty array of {name, parent?, pivot?, sprite_layer?}"}
+
+	var pose_layer_name: String = str(params.get("pose_layer_name", _skeletor.default_pose_layer_name()))
+	# Skeletor adopts a pixel layer as the pose layer by matching "Pose Layer" in its capitalised
+	# name, so a custom name that does not contain it would never be picked up on a reload.
+	if not "Pose Layer" in pose_layer_name.capitalize():
+		return {"success": false, "error": "pose_layer_name must contain 'Pose Layer' -- Skeletor identifies the layer by name on first discovery (got '%s')" % pose_layer_name}
+
+	# Order the specs so a parent is always created before its children, whatever order they
+	# arrived in. Anything left over has a missing parent or sits in a cycle.
+	var pending := []
+	for spec in bone_specs:
+		if not spec is Dictionary or str(spec.get("name", "")).is_empty():
+			return {"success": false, "error": "Each bone needs a non-empty 'name'"}
+		pending.append(spec)
+	var ordered := []
+	var available := {}
+	for i in range(project.layers.size()):
+		if project.layers[i].get_layer_type() == _api.tools.LayerTypes.GROUP:
+			available[str(project.layers[i].name)] = true
+	while not pending.is_empty():
+		var progressed := false
+		var still_pending := []
+		for spec in pending:
+			var parent_name: String = str(spec.get("parent", ""))
+			if parent_name.is_empty() or available.has(parent_name):
+				ordered.append(spec)
+				available[str(spec.get("name"))] = true
+				progressed = true
+			else:
+				still_pending.append(spec)
+		pending = still_pending
+		if not progressed:
+			var unresolved := []
+			for spec in pending:
+				unresolved.append("%s (parent '%s')" % [str(spec.get("name")), str(spec.get("parent", ""))])
+			return {"success": false, "error": "Unresolvable bone parents (missing parent, or a cycle): %s" % str(unresolved)}
+
+	var created_bones := []
+	for spec in ordered:
+		var bone_name: String = str(spec.get("name"))
+		var parent_name: String = str(spec.get("parent", ""))
+
+		if _skeletor_layer_index_by_name(project, bone_name) >= 0:
+			return {"success": false, "error": "A layer named '%s' already exists -- bone names must be unique layer names" % bone_name}
+
+		var anchor_idx: int
+		var nest: bool
+		if parent_name.is_empty():
+			anchor_idx = _skeletor_root_anchor(project)
+			nest = false
+		else:
+			anchor_idx = _skeletor_layer_index_by_name(project, parent_name)
+			if anchor_idx < 0:
+				return {"success": false, "error": "Parent bone '%s' not found" % parent_name}
+			nest = true
+
+		var added := _skeletor_add_layer(project, anchor_idx, nest, bone_name, _api.tools.LayerTypes.GROUP)
+		if added.has("error"):
+			return {"success": false, "error": added["error"]}
+		var bone_layer = added["layer"]
+
+		# Verify the hierarchy rather than trusting it: add_layer()'s parent choice depends on the
+		# surrounding layers, so a wrong anchor produces a silently malformed rig.
+		var actual_parent: String = str(bone_layer.parent.name) if bone_layer.parent != null else ""
+		if actual_parent != parent_name:
+			return {"success": false, "error": "Bone '%s' nested under '%s' instead of '%s'; rig is incomplete" % [bone_name, actual_parent, parent_name]}
+
+		# Only the layer_id handle is recorded here. Indices are resolved at the end, once every
+		# layer exists: each insertion shifts the ones above it, so an index captured now is stale.
+		var entry := {
+			"name": bone_name,
+			"parent": parent_name,
+			"layer_id": _get_or_create_layer_id(bone_layer),
+		}
+
+		if bool(spec.get("sprite_layer", true)):
+			var sprite_name: String = str(spec.get("sprite_layer_name", "%s_Sprite" % bone_name))
+			var sprite := _skeletor_add_layer(
+				project,
+				project.layers.find(bone_layer),
+				true,
+				sprite_name,
+				_api.tools.LayerTypes.PIXEL
+			)
+			if sprite.has("error"):
+				return {"success": false, "error": sprite["error"]}
+			entry["sprite_layer"] = sprite_name
+			entry["sprite_layer_id"] = _get_or_create_layer_id(sprite["layer"])
+		created_bones.append(entry)
+
+	# The pose layer goes on top, anchored on the topmost layer so it inherits no parent.
+	var pose_layer = _skeletor.pose_layer(project)
+	var pose_created := false
+	if pose_layer == null:
+		var added_pose := _skeletor_add_layer(
+			project,
+			project.layers.size() - 1,
+			false,
+			pose_layer_name,
+			_api.tools.LayerTypes.PIXEL
+		)
+		if added_pose.has("error"):
+			return {"success": false, "error": added_pose["error"]}
+		pose_layer = added_pose["layer"]
+		pose_created = true
+	if not _skeletor.assign_pose_layer(project, pose_layer):
+		return {"success": false, "error": "Could not assign '%s' as Skeletor's pose layer" % str(pose_layer.name)}
+
+	# Catalogue the new group layers as bones, then apply any requested pivots.
+	_skeletor.catalogue(project)
+	var frame_idx: int = project.current_frame
+	var bones: Dictionary = _skeletor.bones_at(project, frame_idx)
+	var missing := []
+	for entry in created_bones:
+		if not bones.has(entry["name"]):
+			missing.append(entry["name"])
+	if not missing.is_empty():
+		return {"success": false, "error": "Skeletor did not catalogue these bones: %s" % str(missing)}
+
+	for spec in ordered:
+		if not spec.has("pivot"):
+			continue
+		var bone = bones[str(spec.get("name"))]
+		bone.gizmo_origin = _skeletor_parse_vec2(spec.get("pivot"), bone.gizmo_origin)
+	_skeletor.save_bones(project, bones, frame_idx)
+	_skeletor_ensure_skeletons(project)
+
+	var bone_rows := []
+	for entry in created_bones:
+		var row: Dictionary = _skeletor.describe_bone(bones[entry["name"]])
+		row.merge(entry, true)
+		row["layer_index"] = _skeletor_layer_index_by_name(project, str(entry["name"]))
+		if entry.has("sprite_layer"):
+			row["sprite_layer_index"] = _skeletor_layer_index_by_name(
+				project, str(entry["sprite_layer"])
+			)
+		bone_rows.append(row)
+
+	return {
+		"success": true,
+		"data": {
+			"bones": bone_rows,
+			"pose_layer": str(pose_layer.name),
+			"pose_layer_index": project.layers.find(pose_layer),
+			"pose_layer_created": pose_created,
+			"frame": frame_idx,
+		}
+	}
+
+
+# ─────────────────────────────────────────────
+# apply_bone_pose
+# ─────────────────────────────────────────────
+
+func _cmd_apply_bone_pose(params: Dictionary) -> Dictionary:
+	var ctx := _skeletor_context()
+	if ctx.has("error"):
+		return {"success": false, "error": ctx["error"]}
+	var project = ctx["project"]
+
+	var frame_idx: int = int(params.get("frame", project.current_frame))
+	if frame_idx < 0 or frame_idx >= project.frames.size():
+		return {"success": false, "error": "Frame index out of bounds: %d (0..%d)" % [frame_idx, project.frames.size() - 1]}
+
+	# Accept either a list of bone poses or a single flat one.
+	var pose_specs = params.get("bones", null)
+	if pose_specs == null:
+		if not params.has("bone"):
+			return {"success": false, "error": "Provide either 'bones' (array of pose dictionaries) or 'bone' (a single bone name)"}
+		var single := params.duplicate()
+		single["name"] = params.get("bone")
+		pose_specs = [single]
+	if not pose_specs is Array or pose_specs.is_empty():
+		return {"success": false, "error": "Parameter 'bones' must be a non-empty array"}
+
+	_skeletor.catalogue(project)
+	_skeletor_ensure_skeletons(project)
+
+	var bones: Dictionary = _skeletor.bones_at(project, frame_idx)
+	if bones.is_empty():
+		return {"success": false, "error": "Frame %d has no skeleton. Run setup_skeletor_rig first (bones are group layers)." % frame_idx}
+
+	var quick_set: bool = bool(params.get("quick_set_pivot", false))
+	var applied := []
+	for spec in pose_specs:
+		if not spec is Dictionary:
+			return {"success": false, "error": "Each entry of 'bones' must be a dictionary"}
+		var bone_name: String = str(spec.get("name", ""))
+		if not bones.has(bone_name):
+			return {"success": false, "error": "Bone '%s' not found on frame %d. Known bones: %s" % [bone_name, frame_idx, str(bones.keys())]}
+		var bone = bones[bone_name]
+
+		if spec.has("pivot"):
+			bone.gizmo_origin = _skeletor_parse_vec2(spec.get("pivot"), bone.gizmo_origin)
+		elif quick_set:
+			var layer_idx := _skeletor_layer_index_by_name(project, bone_name)
+			var origin: Vector2i = _skeletor.best_origin(project, layer_idx)
+			if origin != Vector2i.ZERO:
+				bone.gizmo_origin = Vector2(origin)
+		if spec.has("rotation_deg"):
+			bone.bone_rotation = deg_to_rad(float(spec.get("rotation_deg")))
+		if spec.has("rotate_origin_deg"):
+			bone.gizmo_rotate_origin = deg_to_rad(float(spec.get("rotate_origin_deg")))
+		if spec.has("translate"):
+			bone.start_point = _skeletor_parse_vec2(spec.get("translate"), bone.start_point)
+		if spec.has("transformation_algorithm"):
+			bone.transformation_algorithm = int(spec.get("transformation_algorithm"))
+		applied.append(_skeletor.describe_bone(bone))
+
+	_skeletor.save_bones(project, bones, frame_idx)
+
+	var data := {"frame": frame_idx, "bones": applied}
+	if bool(params.get("render", true)):
+		var render_result: Dictionary = _skeletor.render_frames(project, [frame_idx])
+		if render_result.has("error"):
+			return {"success": false, "error": render_result["error"]}
+		data.merge(render_result, true)
+	return {"success": true, "data": data}
+
+
+# ─────────────────────────────────────────────
+# generate_skeletor_tween
+# ─────────────────────────────────────────────
+
+func _cmd_generate_skeletor_tween(params: Dictionary) -> Dictionary:
+	var ctx := _skeletor_context()
+	if ctx.has("error"):
+		return {"success": false, "error": ctx["error"]}
+	var project = ctx["project"]
+
+	var from_frame: int = int(params.get("from_frame", 0))
+	var to_frame: int = int(params.get("to_frame", project.frames.size() - 1))
+	if from_frame < 0 or from_frame >= project.frames.size():
+		return {"success": false, "error": "from_frame out of bounds: %d (0..%d)" % [from_frame, project.frames.size() - 1]}
+	if to_frame < 0 or to_frame >= project.frames.size():
+		return {"success": false, "error": "to_frame out of bounds: %d (0..%d)" % [to_frame, project.frames.size() - 1]}
+	if to_frame - from_frame < 2:
+		return {"success": false, "error": "Need at least one frame between the keyframes (from_frame=%d, to_frame=%d)" % [from_frame, to_frame]}
+
+	var transition_name: String = str(params.get("transition", "linear")).to_lower()
+	var easing_name: String = str(params.get("easing", "in_out")).to_lower()
+	if not SKELETOR_TRANSITIONS.has(transition_name):
+		return {"success": false, "error": "Unknown transition '%s'. Options: %s" % [transition_name, str(SKELETOR_TRANSITIONS.keys())]}
+	if not SKELETOR_EASINGS.has(easing_name):
+		return {"success": false, "error": "Unknown easing '%s'. Options: %s" % [easing_name, str(SKELETOR_EASINGS.keys())]}
+	var transition: int = SKELETOR_TRANSITIONS[transition_name]
+	var easing: int = SKELETOR_EASINGS[easing_name]
+
+	_skeletor.catalogue(project)
+	_skeletor_ensure_skeletons(project)
+
+	var start_data: Dictionary = _skeletor.data_at(project, from_frame)
+	var end_data: Dictionary = _skeletor.data_at(project, to_frame)
+	if start_data.is_empty():
+		return {"success": false, "error": "Frame %d has no skeleton to tween from" % from_frame}
+	if end_data.is_empty():
+		return {"success": false, "error": "Frame %d has no skeleton to tween to" % to_frame}
+
+	# Default to every bone that exists at both keyframes.
+	var bone_names := []
+	if params.has("bones"):
+		var requested = params.get("bones")
+		if not requested is Array or requested.is_empty():
+			return {"success": false, "error": "Parameter 'bones' must be a non-empty array of bone names"}
+		for name_value in requested:
+			var bone_name := str(name_value)
+			if not start_data.has(bone_name) or not end_data.has(bone_name):
+				return {"success": false, "error": "Bone '%s' is missing from one of the keyframes (frames %d and %d)" % [bone_name, from_frame, to_frame]}
+			bone_names.append(bone_name)
+	else:
+		for bone_name in start_data.keys():
+			if end_data.has(bone_name):
+				bone_names.append(str(bone_name))
+	if bone_names.is_empty():
+		return {"success": false, "error": "No bones present at both keyframes"}
+
+	var span := float(to_frame - from_frame)
+	var tweened_frames := []
+	for frame_idx in range(from_frame + 1, to_frame):
+		var frame_bones: Dictionary = _skeletor.bones_at(project, frame_idx)
+		if frame_bones.is_empty():
+			continue
+		for bone_name in bone_names:
+			if not frame_bones.has(bone_name):
+				continue
+			var bone = frame_bones[bone_name]
+			for field in _skeletor.tweenable_fields():
+				if not (start_data[bone_name].has(field) and end_data[bone_name].has(field)):
+					continue
+				var start_value = start_data[bone_name][field]
+				var delta = end_data[bone_name][field] - start_value
+				bone.set(field, Tween.interpolate_value(
+					start_value,
+					delta,
+					float(frame_idx - from_frame),
+					span,
+					transition,
+					easing
+				))
+		_skeletor.save_bones(project, frame_bones, frame_idx)
+		tweened_frames.append(frame_idx)
+
+	var data := {
+		"from_frame": from_frame,
+		"to_frame": to_frame,
+		"transition": transition_name,
+		"easing": easing_name,
+		"bones": bone_names,
+		"tweened_frames": tweened_frames,
+	}
+
+	if bool(params.get("render", true)):
+		var frames_to_render := []
+		for f in range(from_frame, to_frame + 1):
+			frames_to_render.append(f)
+		var render_result: Dictionary = _skeletor.render_frames(project, frames_to_render)
+		if render_result.has("error"):
+			return {"success": false, "error": render_result["error"]}
+		data.merge(render_result, true)
+
+	# Report the resulting curve so the caller can verify the motion without exporting.
+	var timeline := []
+	for f in range(from_frame, to_frame + 1):
+		var frame_data: Dictionary = _skeletor.data_at(project, f)
+		var row := {"frame": f}
+		for bone_name in bone_names:
+			row[bone_name] = rad_to_deg(frame_data.get(bone_name, {}).get("bone_rotation", 0.0))
+		timeline.append(row)
+	data["rotation_deg_timeline"] = timeline
+	return {"success": true, "data": data}
+
+
+# ─────────────────────────────────────────────
+# set_skeletor_mode
+# ─────────────────────────────────────────────
+
+func _cmd_set_skeletor_mode(params: Dictionary) -> Dictionary:
+	var ctx := _skeletor_context()
+	if ctx.has("error"):
+		return {"success": false, "error": ctx["error"]}
+	var project = ctx["project"]
+
+	var mode: String = str(params.get("mode", "pose")).to_lower()
+	if mode != "pose" and mode != "draw":
+		return {"success": false, "error": "mode must be 'pose' or 'draw' (got '%s')" % mode}
+
+	var result: Dictionary = _skeletor.set_view_mode(project, mode == "pose")
+	if result.has("error"):
+		return {"success": false, "error": result["error"]}
+	return {"success": true, "data": result}

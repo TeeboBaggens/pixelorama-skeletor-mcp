@@ -18,6 +18,7 @@ import { registerImporterTools } from "./tools/importer.js";
 import { registerProceduralTools } from "./tools/procedural.js";
 import { registerTilemapTools } from "./tools/tilemap.js";
 import { registerGodotExportTools } from "./tools/godot_export.js";
+import { registerSkeletorTools } from "./tools/skeletor.js";
 
 export function createServer(): McpServer {
   const server = new McpServer({
@@ -38,6 +39,7 @@ export function createServer(): McpServer {
   registerProceduralTools(server);
   registerTilemapTools(server);
   registerGodotExportTools(server);
+  registerSkeletorTools(server);
 
   console.error("[pix-MCP] All 40+ tools registered successfully");
 

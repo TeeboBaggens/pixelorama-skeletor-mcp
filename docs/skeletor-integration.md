@@ -54,6 +54,20 @@ instead of silently corrupting pose data.
   - by meta flag `SkeletorPoseLayer` (set once assigned), via `is_pose_layer()`;
   - on first discovery, by name — `fix_skeleton_heirarchy()` matches any pixel layer
     where `"Pose Layer" in layer.name.capitalize()`.
+
+  Name discovery sets only the manager's **in-memory** reference; it never writes the
+  `SkeletorPoseLayer` flag that `is_pose_layer()`/`find_pose_layer()` read back. The flag is
+  written exclusively by the `pose_layer` **setter** (which calls `assign_pose_layer()`), and
+  upstream only reaches that setter through the tool UI's assign menu item. Nothing does that
+  headlessly, so the choice does not survive a manager reset or a project reload unless the
+  adapter assigns through the setter itself:
+
+  ```gdscript
+  mgr.pose_layer = layer   # setter -> assign_pose_layer() -> sets SkeletorPoseLayer
+  ```
+
+  This also constrains naming: a pose layer whose name does not contain "Pose Layer" can never be
+  re-discovered, so `setup_skeletor_rig` rejects one.
 - **Pose data is cel metadata**, *not* layer or canvas data. Per frame, on the pose
   layer's cel, key `SkeletorSkeleton`, a `var_to_str`-serialized
   `{bone_name: {...}}` dictionary.
@@ -163,7 +177,18 @@ and aborting the command *after* the layer was created but *before* it returned 
 got an empty `{}` response for a layer that actually exists. The line above it already sets
 `project.current_layer` directly, so the assignment was redundant as well as fatal.
 
+### 6d. `get_best_origin()` ignores sparse-cel offsets
+
+Skeletor's quick-set pivot reads `get_used_rect()` straight off the cel image. On Pixelorama 1.2's
+sparse cels that rect is in **cel-local** coordinates, so the returned pivot is only correct while
+`cel.offset` happens to be zero. The adapter computes the merged rect itself and adds the offset
+(`best_origin()`) instead of delegating.
+
 ## 7. What must be reimplemented bridge-side
+
+> **Status:** tweening, quick-set and the draw/pose view switch are implemented and verified —
+> see `pixelorama-plugin/skeletor_adapter.gd` and the `_cmd_*skeletor*` / `_cmd_apply_bone_pose`
+> handlers in `command_handler.gd`. Copy-pose and IK are not.
 
 Skeletor's higher-level features live in its **tool UI script** (`Tool/skeleton_tool.gd`,
 a `Control` wired to popup menus), not in the manager, so they cannot be called headlessly.
@@ -191,11 +216,11 @@ They are all thin wrappers over manager primitives and are cheaper to reimplemen
   make the next launch treat the session as a crash and **quarantine the extensions** into
   `give_in_bug_report/`. `scripts/dev/run-pixelorama.sh` clears both before starting.
 
-## 9. Animating across frames — three traps, all verified
+## 9. Animating across frames — six traps, all verified
 
 Posing one frame is easy; animating is where the sharp edges are. An 8-frame arm swing
 (0° → 90°, sine ease-in-out) was built and rendered successfully — see
-`scripts/dev/spikes/tween_spike.gd` and `docs/spike-arm-swing.gif`. Three things must be
+`scripts/dev/spikes/tween_spike.gd` and `docs/spike-arm-swing.gif`. Six things must be
 handled, or it silently produces nothing:
 
 **9a. Duplicating a frame does not duplicate the skeleton.**
@@ -265,6 +290,26 @@ for l in project.layers:
 See `scripts/dev/spikes/pose_mode.gd`. Any export or capture after posing needs this, and it is
 the natural job of a `set_skeletor_mode` tool.
 
+**9e. The in-memory bone set is the authority for the current frame — in both directions.**
+§9c covers the read side. The write side is worse: `update_frame_data()` *ends* by calling
+`save_frame_info(project)`, which writes `current_frame_bones` straight back to cel metadata. So a
+metadata-only write to the current frame is silently reverted by the next catalogue pass. Observed
+live: a pivot set during rig construction read back as `(0,0)` on the following pose call, because
+`load_frame_bones()` returns **fresh** `SkeletonBone` objects rather than the manager's own, so
+writing to them left `current_frame_bones` holding the stale defaults. Every write must re-sync:
+
+```gdscript
+mgr.save_frame_info(project, bones, frame)
+if frame == mgr.current_frame:
+    mgr.current_frame_bones = mgr.load_frame_bones(project, frame)
+```
+
+**9f. `generate_pose()` is a no-op while the pose layer is hidden.**
+`if not pose_layer.visible: return`, before any work. Combined with 9d, the default headless state
+(draw view, pose layer hidden) means posing silently does nothing. Show the layer for the render
+and restore the previous visibility afterwards — the rendered pixels persist in the cel regardless
+of visibility.
+
 The easing curve is ours, not Skeletor's: upstream's tween hardcodes
 `TRANS_LINEAR / EASE_IN`. Because we reimplement the loop, every Godot `Tween.TransitionType`
 and `EaseType` is available to `generate_skeletor_tween`.
@@ -282,6 +327,45 @@ All six verified live against Pixelorama v1.2.4-stable. Everything is in
 | 4 | removed four invalid `_api.project.current_layer = ...` assignments | layer commands return real indices and ids instead of `{}` |
 | 5 | `_cmd_duplicate_frame` copies cel `offset` and all cel metadata | all 8 frames carry `SkeletorSkeleton` after duplication (was: frame 0 only) |
 | 6 | `pack.gd` reads `PIXELORAMA_SRC` / `PIXELORAMA_EXT_DIR` instead of the original author's hardcoded `/home/abido/...` paths, and warns when the GIF shaders are missing rather than silently shipping a build without them | repacks on macOS with shaders included |
+
+### Further Pixelorama 1.2 drift found while verifying the tool layer
+
+| # | Fix | Verification |
+|---|---|---|
+| 7 | `_cmd_delete_frame` no longer assigns the read-only `_api.project.current_frame` (same bug as #4) | `delete_frame` returns its payload instead of `{}` |
+| 8 | `_cmd_set_tile_mode` writes `project.tiles.mode`; `project.tile_mode` was removed in 1.2 | `set_tile_mode` passes |
+| 9 | `_cmd_set_symmetry_guide` sets the symmetry points and returns an explicit `warning` rather than raising on the removed `show_x_symmetry` / `show_y_symmetry` | fails loudly, with the migration path recorded in the handler |
+
+The repo's own suite went from **106/111 to 109/111**. The one remaining failure is test data, not a
+tool: it asks `switch_palette` for a palette named "Default", which no stock install ships.
+
+### A Skeletor bug we do *not* trigger
+
+`update_frame_data()` dereferences the pose layer before checking it exists:
+
+```gdscript
+var d_cel = project.frames[current_frame].cels[project.layers.find(pose_layer)]
+...
+if p_cel.get_content().get_data() == d_cel.get_content().get_data():
+```
+
+With no pose layer, `find(null)` returns `-1`, which indexes the **last** cel; if that is a group
+cel, `get_content()` returns an Array and the call raises
+`Invalid call. Nonexistent function 'get_data' in base 'Array'`. It fires from Skeletor's own
+frame-added signal handler on any rig-less project, so adding a frame to an ordinary drawing logs
+the error. It is non-fatal and upstream's. Our adapter never reaches it: `catalogue()` returns
+early unless a pose layer resolves.
+
+### Added for the Skeletor tool layer
+
+| Area | Behaviour |
+|---|---|
+| pose layer flag | assigned through the `pose_layer` setter so `SkeletorPoseLayer` is persisted (§3) |
+| in-memory sync | `save_bones()` re-syncs `current_frame_bones` after writing the current frame (§9e) |
+| render visibility | `render_frames()` shows the pose layer for the render and restores it (§9f) |
+| quick-set pivot | `best_origin()` is offset-aware rather than delegating to `get_best_origin()` (§6d) |
+| layer nesting | `_skeletor_add_layer()` toggles the anchor group's `expanded` to choose nest vs. sibling (§5) |
+| index reporting | layer indices are resolved after every layer exists, since each insert shifts the rest |
 
 Fixes 1-5 are **not** Skeletor-specific — they repair the bridge's core drawing, layer and export
 paths against current Pixelorama. The Skeletor work sits on top of them.
