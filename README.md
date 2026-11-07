@@ -404,6 +404,34 @@ Architecture, Skeletor's data model and the full reverse-engineering notes are i
 - You are on Node 18 or 20. Both are end-of-life and below eslint 10's floor
   (`^20.19 || ^22.13 || >=24`). Use Node 22.13 or newer.
 
+#### Do not run `npm audit fix --force` here
+It will silently **downgrade the toolchain**, because npm treats a major downgrade as a valid
+"fix": eslint 10 → 9 (which npm itself then reports as no longer supported), and typescript-eslint
+8 → 7. It rewrites `package.json` while doing it, and can leave the tree in a state where plain
+`npm audit fix` then refuses to run at all with `ERESOLVE`.
+
+Every finding in this project's audit traces to a single transitive package, `minimatch`, pulled in
+by eslint and typescript-eslint. It is pinned instead:
+
+```json
+"overrides": { "minimatch": "^11.0.5" }
+```
+
+`<= 11.0.0` carries a glob-amplification DoS advisory (GHSA-g3hv-75wg-m249); `11.0.5` is outside
+that range. That takes the audit to **0 vulnerabilities** with the toolchain untouched. If a future
+audit flags something, prefer an `overrides` pin on the offending transitive package over
+`--force`. Note these are all **dev-only** dependencies — they lint and compile this repo's own
+source and ship in nothing at runtime.
+
+To recover if `--force` has already run:
+
+```bash
+git checkout -- mcp-server/package.json mcp-server/package-lock.json
+cd mcp-server && rm -rf node_modules && npm ci
+npx tsc --version      # expect 7.x
+npm ls --depth=0       # expect eslint 10.x, typescript-eslint 8.x
+```
+
 #### Why are there two TypeScript packages?
 TypeScript 7.0 is the new native compiler and **ships no compiler API** — its main export is just
 `version.cjs`, with the API behind explicitly `unstable/*` subpaths. `typescript-eslint` imports
