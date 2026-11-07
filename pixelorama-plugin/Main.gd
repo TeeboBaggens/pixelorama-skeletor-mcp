@@ -5,6 +5,9 @@
 extends Node
 
 const PORT: int = 7373
+## How long the HTTP caller waits before giving up. The command itself cannot be cancelled, so
+## this bounds the *wait*, not the work. Override per request with a top-level "timeout_ms".
+const DEFAULT_EXEC_TIMEOUT_MS: int = 60000
 const MAX_REQUEST_SIZE: int = 4194304  # 4 MB max request body
 
 var _server: TCPServer = TCPServer.new()
@@ -15,12 +18,33 @@ var _command_handler: RefCounted = null
 
 const LOG_TAG: String = "[pix-MCP] "
 
+## Guards against stacking work on the main thread. A timed-out request is NOT cancelled --
+## GDScript cannot preempt a running function -- so the job stays on the main thread after the
+## HTTP caller has given up. Dispatching a second job then queues it *behind* the first, and a
+## client that retries on timeout multiplies the freeze instead of recovering from it. This flag
+## tracks the main thread, not the HTTP wait, so retries are refused until the thread is free.
+var _exec_mutex: Mutex = Mutex.new()
+var _exec_busy: bool = false
+var _exec_busy_tool: String = ""
+var _exec_busy_since: int = 0
+
+## Heartbeat proving the main thread is alive. execute() is fully synchronous, so while a command
+## is genuinely running _process() cannot run and this stops advancing. A claim that is still held
+## while this keeps ticking therefore belongs to a job that no longer exists -- its deferred call
+## was dropped -- and the flag must be reclaimed, or the bridge wedges until Pixelorama restarts.
+var _main_tick_msec: int = 0
+## Main thread counts as alive if it ticked this recently.
+const MAIN_ALIVE_WINDOW_MS: int = 500
+## Grace before a held claim with a live main thread is treated as stale.
+const STALE_CLAIM_MS: int = 2000
+
 class PendingRequest extends RefCounted:
 	var tool_name: String = ""
 	var params: Dictionary = {}
 	var response: Dictionary = {}
 	var semaphore: Semaphore = Semaphore.new()
 	var timed_out: bool = false
+	var deadline_msec: int = 0
 
 
 func _enter_tree() -> void:
@@ -44,6 +68,11 @@ func _enter_tree() -> void:
 	print(LOG_TAG + "HTTP server listening on 127.0.0.1:%d" % PORT)
 	print(LOG_TAG + "Pixelorama version: %s" % _api.general.get_pixelorama_version())
 	print(LOG_TAG + "ExtensionsApi version: %d" % _api.get_api_version())
+
+	# The heartbeat has to keep ticking even when the scene tree is paused by a modal dialog,
+	# otherwise a paused editor looks identical to a blocked main thread.
+	process_mode = Node.PROCESS_MODE_ALWAYS
+	set_process(true)
 
 	_is_running = true
 	_thread.start(_server_worker_loop)
@@ -154,7 +183,9 @@ func _process_http_request(peer: StreamPeerTCP, buffer: PackedByteArray, header_
 		response_body = JSON.stringify(result)
 		if result.get("success", false):
 			status_code = 200
-		elif str(result.get("error", "")).find("timed out") != -1:
+		elif result.get("busy", false):
+			status_code = 503
+		elif result.get("timed_out", false):
 			status_code = 504
 		else:
 			status_code = 400
@@ -188,6 +219,63 @@ func _process_http_request(peer: StreamPeerTCP, buffer: PackedByteArray, header_
 	peer.disconnect_from_host()
 
 
+## Claims the main thread for one command. Returns false if a previous command is still running.
+func _process(_delta: float) -> void:
+	_exec_mutex.lock()
+	_main_tick_msec = Time.get_ticks_msec()
+	_exec_mutex.unlock()
+
+
+func _claim_main_thread(tool_name: String) -> bool:
+	_exec_mutex.lock()
+	if _exec_busy:
+		var now := Time.get_ticks_msec()
+		var main_alive := now - _main_tick_msec < MAIN_ALIVE_WINDOW_MS
+		var held_for := now - _exec_busy_since
+		if not (main_alive and held_for > STALE_CLAIM_MS):
+			_exec_mutex.unlock()
+			return false
+		push_warning(
+			LOG_TAG
+			+ (
+				"Reclaiming a stale lock from '%s' held for %d ms while the main thread was idle"
+				% [_exec_busy_tool, held_for]
+			)
+		)
+	_exec_busy = true
+	_exec_busy_tool = tool_name
+	_exec_busy_since = Time.get_ticks_msec()
+	_exec_mutex.unlock()
+	return true
+
+
+func _release_main_thread() -> void:
+	_exec_mutex.lock()
+	_exec_busy = false
+	_exec_busy_tool = ""
+	_exec_busy_since = 0
+	_exec_mutex.unlock()
+
+
+func _busy_response() -> Dictionary:
+	_exec_mutex.lock()
+	var tool_name := _exec_busy_tool
+	var elapsed := Time.get_ticks_msec() - _exec_busy_since
+	_exec_mutex.unlock()
+	return {
+		"success": false,
+		"busy": true,
+		"running_tool": tool_name,
+		"running_for_ms": elapsed,
+		"error": (
+			"Pixelorama's main thread is still executing '%s' (%d ms so far). "
+			% [tool_name, elapsed]
+			+ "It cannot be interrupted, and queueing another command behind it would extend "
+			+ "the freeze. Wait for it to finish, then retry."
+		)
+	}
+
+
 func _dispatch_command_to_main_thread(body: String) -> Dictionary:
 	if _command_handler == null:
 		return {"success": false, "error": "Command handler not initialized"}
@@ -207,43 +295,74 @@ func _dispatch_command_to_main_thread(body: String) -> Dictionary:
 	if tool_name.is_empty():
 		return {"success": false, "error": "Missing 'tool' field in request"}
 
+	if not _claim_main_thread(tool_name):
+		return _busy_response()
+
+	# Per-request override, so a known-slow command can ask for longer and a caller that wants to
+	# fail fast can ask for less. Clamped: below a second nothing useful finishes, and above ten
+	# minutes the window has been frozen long enough that a human will intervene anyway.
+	var exec_timeout_ms := DEFAULT_EXEC_TIMEOUT_MS
+	if data.has("timeout_ms"):
+		exec_timeout_ms = clampi(int(data.get("timeout_ms")), 1000, 600000)
+
 	var req := PendingRequest.new()
 	req.tool_name = tool_name
 	req.params = params
+	# Handed to the command handler so loops it owns can stop themselves at the next safe point.
+	req.deadline_msec = Time.get_ticks_msec() + exec_timeout_ms
 
 	call_deferred("_execute_on_main_thread", req)
 
-	const EXEC_TIMEOUT_MS := 60000
 	var start_exec := Time.get_ticks_msec()
 	var completed := false
 	while _is_running:
 		if req.semaphore.try_wait():
 			completed = true
 			break
-		if Time.get_ticks_msec() - start_exec > EXEC_TIMEOUT_MS:
+		if Time.get_ticks_msec() - start_exec > exec_timeout_ms:
 			break
 		OS.delay_msec(2)
 
 	if not completed:
 		req.timed_out = true
-		push_warning(LOG_TAG + "Execution timed out for tool '%s' after %d ms" % [tool_name, EXEC_TIMEOUT_MS])
+		push_warning(
+			LOG_TAG
+			+ (
+				"Gave up waiting on '%s' after %d ms; it is still running on the main thread"
+				% [tool_name, exec_timeout_ms]
+			)
+		)
 		return {
 			"success": false,
-			"error": "Command execution timed out on main thread after %d ms" % EXEC_TIMEOUT_MS
+			"timed_out": true,
+			"error": (
+				"Gave up waiting for '%s' after %d ms. " % [tool_name, exec_timeout_ms]
+				+ "The command is STILL RUNNING on Pixelorama's main thread and cannot be "
+				+ "interrupted, so the window stays unresponsive until it finishes on its own. "
+				+ "Further commands are refused until then."
+			)
 		}
 
 	return req.response
 
 
 func _execute_on_main_thread(req: PendingRequest) -> void:
+	# Timed out before this even started -- drop it rather than freeze the window for a reply
+	# nobody is waiting for.
 	if req.timed_out:
+		_release_main_thread()
 		req.semaphore.post()
 		return
 
 	if _command_handler != null:
+		if _command_handler.has_method("begin_request"):
+			_command_handler.begin_request(req.deadline_msec)
 		req.response = _command_handler.execute(req.tool_name, req.params)
+		if _command_handler.has_method("end_request"):
+			_command_handler.end_request()
 	else:
 		req.response = {"success": false, "error": "Command handler not initialized"}
+	_release_main_thread()
 	req.semaphore.post()
 
 
@@ -254,6 +373,7 @@ func _status_text(code: int) -> String:
 		400: return "Bad Request"
 		404: return "Not Found"
 		500: return "Internal Server Error"
+		503: return "Service Unavailable"
 		504: return "Gateway Timeout"
 	return "Unknown"
 

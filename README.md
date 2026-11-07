@@ -657,6 +657,33 @@ and, if so, renders an empty image to the current frame and returns — even whe
 different frame. One skeleton-less current frame therefore suppresses every render and blanks that
 frame. The bridge populates the in-memory set before rendering anything.
 
+#### A command timed out and now Pixelorama is unresponsive
+A timed-out command is **not cancelled**. GDScript cannot preempt a running function, so when the
+bridge stops waiting it only gives up on the *reply* — the command keeps running on Pixelorama's
+main thread, and the window stays frozen until it finishes on its own.
+
+The bridge does three things about this:
+
+- The 504 says so explicitly, rather than implying the work stopped.
+- Further commands are refused with **503** (`"busy": true`, plus `running_tool` and
+  `running_for_ms`) instead of being queued. Queueing is what turns one slow command into a
+  compounding freeze: a client that retries on timeout stacks another job behind the one already
+  running. Nothing is lost — the bridge frees itself as soon as the main thread is done.
+- The long loops the bridge owns (rig building, sprite placement, tweening) poll the caller's
+  deadline and stop at the next safe point. Unbounded, a 400-bone chain pins the main thread for
+  ~110s; with a budget it stops in ~3s. Work already done is left in place, so undo it or start
+  from a fresh canvas.
+
+Set a per-request budget with a top-level `"timeout_ms"` next to `"tool"` and `"params"`
+(clamped to 1s–10min; default 60s):
+
+```json
+{ "tool": "setup_skeletor_rig", "params": { "bones": [] }, "timeout_ms": 120000 }
+```
+
+Commands with no loop to poll — a single huge image operation — still cannot be interrupted. The
+only guarantee there is that the bridge will not make the freeze worse.
+
 #### Building a large rig hangs Pixelorama
 Fixed in this fork; if you see it, the bridge build predates the fix.
 

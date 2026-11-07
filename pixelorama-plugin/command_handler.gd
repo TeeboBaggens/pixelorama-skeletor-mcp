@@ -156,6 +156,37 @@ func get_available_tools() -> Array:
 	return tools
 
 
+## Wall-clock point past which the HTTP caller has given up on the running command.
+var _deadline_msec: int = 0
+
+
+func begin_request(deadline_msec: int) -> void:
+	_deadline_msec = deadline_msec
+
+
+func end_request() -> void:
+	_deadline_msec = 0
+
+
+## True once the caller has stopped waiting. GDScript cannot preempt a running function, so the
+## only way to stop long work is for the loops that own it to poll this and return at a safe
+## point. Every caller MUST leave the project in a consistent state before bailing out.
+func past_deadline() -> bool:
+	return _deadline_msec > 0 and Time.get_ticks_msec() > _deadline_msec
+
+
+func _abandoned(what: String, done: int, total: int) -> Dictionary:
+	push_warning(LOG_TAG + "Abandoned %s after %d of %d" % [what, done, total])
+	return {
+		"success": false,
+		"abandoned": true,
+		"error": (
+			"Stopped after %d of %d %s because the caller had already timed out. " % [done, total, what]
+			+ "The partial result was left in place -- undo it or start from a fresh canvas."
+		)
+	}
+
+
 func execute(tool_name: String, params: Dictionary) -> Dictionary:
 	if not _tool_registry.has(tool_name):
 		return {"success": false, "error": "Unknown tool: %s" % tool_name}
@@ -6176,6 +6207,11 @@ func _cmd_setup_skeletor_rig(params: Dictionary) -> Dictionary:
 	var signals_suspended: bool = _skeletor.begin_bulk_layer_edit()
 	var created_bones := []
 	for spec in ordered:
+		# Building a bone group is the step that can blow the budget on a deep rig, so this is
+		# where a caller that has already given up gets honoured.
+		if past_deadline():
+			_skeletor.end_bulk_layer_edit(signals_suspended)
+			return _abandoned("bone groups", created_bones.size(), ordered.size())
 		var bone_name: String = str(spec.get("name"))
 		var parent_name: String = str(spec.get("parent", ""))
 
@@ -6227,9 +6263,14 @@ func _cmd_setup_skeletor_rig(params: Dictionary) -> Dictionary:
 	# 47, 931, 32984 ms for bones 1-6 -- while the same sequence with the extension disabled runs
 	# at 2-7 ms throughout. Building every group first and adding the sprites afterwards avoids it
 	# entirely: 43 ms for eight groups plus 15 ms for their eight sprites.
+	var sprites_made := 0
 	for entry in created_bones:
 		if not entry.has("sprite_layer"):
 			continue
+		if past_deadline():
+			_skeletor.end_bulk_layer_edit(signals_suspended)
+			return _abandoned("sprite layers", sprites_made, created_bones.size())
+		sprites_made += 1
 		var owner_idx := _skeletor_layer_index_by_name(project, str(entry["name"]))
 		if owner_idx < 0:
 			_skeletor.end_bulk_layer_edit(signals_suspended)
@@ -6251,9 +6292,16 @@ func _cmd_setup_skeletor_rig(params: Dictionary) -> Dictionary:
 	# limbed rig the useful default is the opposite: a child bone draws in front of the parent it
 	# hangs from. Moving the sprite down to the bottom of its group's children gives that.
 	if not bool(params.get("sprite_above_children", false)):
+		var sunk := 0
 		for entry in created_bones:
 			if not entry.has("sprite_layer"):
 				continue
+			# Each move rescans the layer array, so this pass is quadratic in bone count and is
+			# the most likely place a big rig runs out of budget. Leaving the remaining sprites
+			# at the top of their group is cosmetic, so stopping here is safe.
+			if past_deadline():
+				break
+			sunk += 1
 			var group_idx := _skeletor_layer_index_by_name(project, str(entry["name"]))
 			var sprite_idx := _skeletor_layer_index_by_name(project, str(entry["sprite_layer"]))
 			if group_idx < 0 or sprite_idx < 0:
@@ -6492,6 +6540,8 @@ func _cmd_generate_skeletor_tween(params: Dictionary) -> Dictionary:
 	var span := float(to_frame - from_frame)
 	var tweened_frames := []
 	for frame_idx in range(from_frame + 1, to_frame):
+		if past_deadline():
+			return _abandoned("tweened frames", tweened_frames.size(), int(span) - 1)
 		var frame_bones: Dictionary = _skeletor.bones_at(project, frame_idx)
 		if frame_bones.is_empty():
 			continue
