@@ -404,11 +404,31 @@ Architecture, Skeletor's data model and the full reverse-engineering notes are i
 - You are on Node 18 or 20. Both are end-of-life and below eslint 10's floor
   (`^20.19 || ^22.13 || >=24`). Use Node 22.13 or newer.
 
-#### Why is TypeScript pinned to the 6.0 line rather than 7.x?
-`typescript-eslint` declares `typescript: ">=4.8.4 <6.1.0"`, and as of 2026-11-07 it has no stable
-release supporting TypeScript 7 (the new native compiler) — only alphas. TypeScript is therefore
-held at `~6.0.3`, the newest stable version the lint toolchain accepts. Everything else is on its
-latest stable release.
+#### Why are there two TypeScript packages?
+TypeScript 7.0 is the new native compiler and **ships no compiler API** — its main export is just
+`version.cjs`, with the API behind explicitly `unstable/*` subpaths. `typescript-eslint` imports
+that API, so it cannot run against TS 7 at all and fails fast with
+`typescript-eslint does not support TS 7.0` ([typescript-eslint#10940] tracks support).
+
+This project therefore uses Microsoft's documented side-by-side arrangement from the
+[TypeScript 7.0 announcement]:
+
+```json
+"@typescript/native": "npm:typescript@^7.0.2",
+"typescript": "npm:@typescript/typescript6@^6.0.2"
+```
+
+The first alias supplies TypeScript 7's `tsc`, so `typecheck` and `build` run on 7. The
+`typescript` specifier resolves to `@typescript/typescript6`, which re-exports the 6.0 API, so
+`typescript-eslint` keeps working. **Both are stable releases — no prerelease is involved**, and
+`npm install` resolves without `--legacy-peer-deps`.
+
+Check what you have with `npx tsc --version` (expect 7.x) and `npm ls typescript` (expect
+`@typescript/typescript6`). Once typescript-eslint supports TS 7, both entries collapse back to a
+plain `"typescript"`.
+
+[typescript-eslint#10940]: https://github.com/typescript-eslint/typescript-eslint/issues/10940
+[TypeScript 7.0 announcement]: https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-6.0
 
 #### Pixelorama is open, but commands time out
 - Verify that `PixMcpBridge.pck` is enabled under **Edit → Preferences → Extensions**.
