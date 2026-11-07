@@ -435,7 +435,7 @@ export function registerProceduralTools(server: McpServer): void {
       layer: layerHandleSchema,
       frame: coerceInt(0).optional().describe("Optional target frame index (defaults to active frame)"),
       params: z
-        .record(z.any())
+        .record(z.string(), z.any())
         .optional()
         .describe("Optional key-value parameters dictionary passed into script (e.g. { width: 320, height: 180 })"),
       record_undo: coerceBool()

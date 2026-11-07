@@ -95,8 +95,10 @@ async function run() {
   await test("set_color", { color: "#ff5500", button: 0 });
   await test("get_color", {});
   await test("list_palettes", {});
-  await test("switch_palette", { name: "Default" });
+  // Create the palette this suite switches to rather than assuming one the install ships:
+  // there is no stock palette named "Default", so the old order always failed here.
   await test("create_palette", { name: "FullTestPal", width: 4, height: 4, is_global: true, colors: ["#ff0000", "#00ff00", "#0000ff", "#ffffff"] });
+  await test("switch_palette", { name: "FullTestPal" });
   await test("add_palette_color", { colors: ["#ffff00", "#ff00ff", "#00ffff"] });
   await test("set_palette_color", { index: 0, color: "#ff0088" });
   await test("get_palette_colors", {});

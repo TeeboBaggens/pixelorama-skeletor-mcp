@@ -854,14 +854,49 @@ Enable Pixelorama's native 3×3 live repeating viewport tile mode for seamless t
 ---
 
 ### `set_symmetry_guide`
-Enable and configure horizontal & vertical symmetry guide planes.
+Enable and position the symmetry (mirror) guides.
+
+**The naming crosses over, so read this carefully:**
+
+| You ask for | It mirrors | The line you see | Default colour |
+|---|---|---|---|
+| `horizontal` | left ↔ right (flips X) | a **vertical** line at `x_pos` | green `#2ecc40` |
+| `vertical` | top ↔ bottom (flips Y) | a **horizontal** line at `y_pos` | orange `#ff851b` |
+
+An axis is named for the coordinate it mirrors *about*; a line is named for its orientation. The
+two guides are given distinct colours by default so they can never be confused on screen.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `horizontal` | boolean | `false` | Enable horizontal symmetry axis |
-| `vertical` | boolean | `false` | Enable vertical symmetry axis |
-| `x_pos` | number | `center` | X position for vertical mirror line |
-| `y_pos` | number | `center` | Y position for horizontal mirror line |
+| `horizontal` | boolean | `false` | Mirror left ↔ right |
+| `vertical` | boolean | `false` | Mirror top ↔ bottom |
+| `x_pos` | number | centre | X of the vertical line used by horizontal symmetry |
+| `y_pos` | number | centre | Y of the horizontal line used by vertical symmetry |
+| `horizontal_color` | string | `#2ecc40` | Colour of the horizontal-symmetry guide |
+| `vertical_color` | string | `#ff851b` | Colour of the vertical-symmetry guide |
+
+```json
+{
+  "success": true,
+  "data": {
+    "horizontal": {
+      "enabled": true, "mirrors": "left <-> right (flips X)",
+      "guide": "vertical line at x=32.0", "guide_node": "y_symmetry_axis",
+      "color": "#2ecc40", "symmetry_point": 63.0
+    },
+    "vertical": {
+      "enabled": true, "mirrors": "top <-> bottom (flips Y)",
+      "guide": "horizontal line at y=32.0", "guide_node": "x_symmetry_axis",
+      "color": "#ff851b", "symmetry_point": 63.0
+    }
+  }
+}
+```
+
+`symmetry_point` is in doubled coordinates (`mirror = symmetry_point - pos`), so a line at canvas
+position P stores `2P - 1`. Mirroring applies to **hand-drawing in the app**; the MCP drawing tools
+write to cel images directly and are not mirrored. A `warning` is returned if guides are hidden
+globally (View → Show Guides).
 
 ---
 

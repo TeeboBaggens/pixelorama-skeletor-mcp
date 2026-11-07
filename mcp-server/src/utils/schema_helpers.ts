@@ -205,11 +205,13 @@ export const fastFlatArraySchema = z
     (val) => Array.isArray(val),
     { message: "Expected a flat array of numbers and hex color strings" }
   ))
-  .refine(
-    (arr) => arr.length <= MAX_FLAT_PIXEL_ELEMENTS,
-    (arr) => ({
-      message: `Array length (${arr.length}) exceeds the maximum safe batch limit of ${MAX_FLAT_PIXEL_ELEMENTS} elements (~${Math.floor(MAX_FLAT_PIXEL_ELEMENTS / 3)} pixels). Please partition your drawing into batches of at most ${Math.floor(MAX_FLAT_PIXEL_ELEMENTS / 3)} pixels per call.`
-    })
-  );
+  .superRefine((arr, ctx) => {
+    if (arr.length <= MAX_FLAT_PIXEL_ELEMENTS) return;
+    const maxPixels = Math.floor(MAX_FLAT_PIXEL_ELEMENTS / 3);
+    ctx.addIssue({
+      code: "custom",
+      message: `Array length (${arr.length}) exceeds the maximum safe batch limit of ${MAX_FLAT_PIXEL_ELEMENTS} elements (~${maxPixels} pixels). Please partition your drawing into batches of at most ${maxPixels} pixels per call.`,
+    });
+  });
 
 

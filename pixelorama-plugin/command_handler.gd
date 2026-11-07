@@ -296,6 +296,27 @@ func _ensure_full_canvas_cel(project, cel) -> void:
 		cel.update_texture()
 
 
+## A canvas-sized copy of a cel's content, placed at the cel's offset.
+##
+## Sparse cels (Pixelorama 1.2+) store only their used content, so a raw `cel.get_image()` is both
+## the wrong size and in the wrong coordinate space for any caller working in canvas coordinates.
+## Unlike _ensure_full_canvas_cel() this is read-only -- the cel itself stays sparse.
+func _canvas_sized_cel_copy(project, cel) -> Image:
+	var w := int(project.size.x) if project != null else 64
+	var h := int(project.size.y) if project != null else 64
+	var out := Image.create_empty(w, h, false, Image.FORMAT_RGBA8)
+	if cel == null or not cel.has_method("get_image"):
+		return out
+	var img: Image = cel.get_image()
+	if img == null or img.is_empty():
+		return out
+	if img.get_format() != Image.FORMAT_RGBA8:
+		img = img.duplicate()
+		img.convert(Image.FORMAT_RGBA8)
+	out.blit_rect(img, Rect2i(Vector2i.ZERO, img.get_size()), _cel_offset(cel))
+	return out
+
+
 ## Adds a layer and returns its real index, or -1.
 ## ExtensionsApi.add_new_layer() renames project.layers[above_layer + 1], which assumes the new
 ## layer lands above the anchor. That holds only when it does NOT nest into a group: when it does,
@@ -4849,43 +4870,106 @@ func _cmd_set_tile_mode(params: Dictionary) -> Dictionary:
 	return {"success": true, "data": {"tile_mode": mode_str, "mode_int": mode_int}}
 
 
+## Toggles and positions Pixelorama's symmetry (mirror) guides.
+##
+## The naming upstream crosses over, so this is worth stating plainly:
+##
+##   horizontal mirroring flips X  (Tools.calculate_mirror_horizontal: x_symmetry_point - pos.x)
+##     -> mirrors left <-> right
+##     -> its guide is the VERTICAL line, `project.y_symmetry_axis`
+##     -> gated by `Global.show_y_symmetry_axis`
+##
+##   vertical mirroring flips Y    (Tools.calculate_mirror_vertical: y_symmetry_point - pos.y)
+##     -> mirrors top <-> bottom
+##     -> its guide is the HORIZONTAL line, `project.x_symmetry_axis`
+##     -> gated by `Global.show_x_symmetry_axis`
+##
+## So an axis is named after the coordinate it mirrors *about*, while a guide is named after the
+## line's orientation -- which is why the two look swapped. The guides are coloured distinctly by
+## default (green for horizontal, orange for vertical) precisely so this is unambiguous on screen.
+##
+## The symmetry *points* are in doubled coordinates: `mirror = symmetry_point - pos`, so a mirror
+## line sitting at canvas position P needs `symmetry_point = 2 * P - 1`. That matches Pixelorama's
+## own defaults (`x_symmetry_point = size.x - 1` puts the line at the canvas centre) and the
+## inverse it applies when the guide is dragged (`x_symmetry_point = points[0].x * 2 - 1`).
 func _cmd_set_symmetry_guide(params: Dictionary) -> Dictionary:
 	var project = _api.project.current_project
 	if project == null:
 		return {"success": false, "error": "No active project"}
+	var global = _api.get_node_or_null("/root/Global")
+	if global == null:
+		return {"success": false, "error": "Global autoload not found"}
+	var tools = _api.tools.autoload()
 
 	var horiz: bool = bool(params.get("horizontal", false))
 	var vert: bool = bool(params.get("vertical", false))
-	var x_pos: int = int(params.get("x_pos", int(project.size.x / 2)))
-	var y_pos: int = int(params.get("y_pos", int(project.size.y / 2)))
+	var x_pos: float = float(params.get("x_pos", project.size.x / 2.0))
+	var y_pos: float = float(params.get("y_pos", project.size.y / 2.0))
+	# Distinct defaults so the two axes are never confusable on screen: green = horizontal
+	# mirroring (a vertical line), orange = vertical mirroring (a horizontal line).
+	var h_color := _parse_color(params, "horizontal_color", Color("#2ecc40"))
+	var v_color := _parse_color(params, "vertical_color", Color("#ff851b"))
 
-	# KNOWN BROKEN against Pixelorama 1.2. `show_x_symmetry`/`show_y_symmetry` no longer exist on
-	# Project: visibility now lives on the SymmetryGuide nodes (`project.x_symmetry_axis.visible`,
-	# gated by `Global.show_x_symmetry_axis and Global.show_guides`) while the mirroring itself is
-	# `Tools.horizontal_mirror`/`vertical_mirror`. Migrating needs a call on which axis "horizontal"
-	# names -- upstream's horizontal mirror drives the *y* axis guide -- so it is left to a
-	# maintainer rather than guessed at here, since a wrong guess silently flips a user-facing axis.
-	# The symmetry points below still exist and are set; only the visibility toggles are missing.
-	project.x_symmetry_point = x_pos
-	project.y_symmetry_point = y_pos
+	# Mirror maths.
+	project.x_symmetry_point = 2.0 * x_pos - 1.0
+	project.y_symmetry_point = 2.0 * y_pos - 1.0
+	tools.horizontal_mirror = horiz
+	tools.vertical_mirror = vert
+
+	# Guides. Visibility is `<axis flag> and show_guides`, exactly as the UI computes it.
+	global.show_y_symmetry_axis = horiz
+	global.show_x_symmetry_axis = vert
+	var show_guides: bool = bool(global.show_guides) if "show_guides" in global else true
+
+	_place_symmetry_guide(project.y_symmetry_axis, true, x_pos, h_color, horiz and show_guides)
+	_place_symmetry_guide(project.x_symmetry_axis, false, y_pos, v_color, vert and show_guides)
 
 	var canvas = _api.general.get_canvas()
 	if canvas:
 		canvas.queue_redraw()
 
-	return {
-		"success": true,
-		"data": {
-			"horizontal": horiz,
-			"vertical": vert,
-			"x_symmetry": x_pos,
-			"y_symmetry": y_pos,
-			"warning": (
-				"Symmetry points were set but the guides were not toggled: Pixelorama 1.2 moved "
-				+ "that onto the SymmetryGuide nodes and the Tools autoload. See the handler."
-			)
-		}
+	var data := {
+		"horizontal": {
+			"enabled": horiz,
+			"mirrors": "left <-> right (flips X)",
+			"guide": "vertical line at x=%.1f" % x_pos,
+			"guide_node": "y_symmetry_axis",
+			"color": "#" + h_color.to_html(false),
+			"symmetry_point": project.x_symmetry_point,
+		},
+		"vertical": {
+			"enabled": vert,
+			"mirrors": "top <-> bottom (flips Y)",
+			"guide": "horizontal line at y=%.1f" % y_pos,
+			"guide_node": "x_symmetry_axis",
+			"color": "#" + v_color.to_html(false),
+			"symmetry_point": project.y_symmetry_point,
+		},
 	}
+	if not show_guides:
+		data["warning"] = (
+			"Guides are hidden globally (View > Show Guides), so the symmetry lines will not be "
+			+ "drawn even though mirroring is active."
+		)
+	return {"success": true, "data": data}
+
+
+## Positions, colours and shows/hides one symmetry guide.
+## `vertical_line` describes the line's orientation, not which mirroring it performs.
+func _place_symmetry_guide(guide, vertical_line: bool, pos: float, color: Color, visible: bool) -> void:
+	if guide == null:
+		return
+	if guide.get_point_count() >= 2:
+		if vertical_line:
+			guide.set_point_position(0, Vector2(pos, -19999))
+			guide.set_point_position(1, Vector2(pos, 19999))
+		else:
+			guide.set_point_position(0, Vector2(-19999, pos))
+			guide.set_point_position(1, Vector2(19999, pos))
+	# Assign default_color rather than calling SymmetryGuide.set_color(), which deliberately
+	# lerps 60% toward blue and would turn these into indistinguishable blue-greys.
+	guide.default_color = color
+	guide.visible = visible
 
 
 func _cmd_set_onion_skinning(params: Dictionary) -> Dictionary:
@@ -5331,7 +5415,9 @@ class ApiContext extends RefCounted:
 		var img: Image = cel.get_image()
 		if img == null:
 			return Image.create(w, h, false, Image.FORMAT_RGBA8) if fallback_empty else null
-		return img.duplicate()
+		# This function documents a canvas-sized image, and callers index it in canvas
+		# coordinates. A sparse cel's raw image is neither, so expand rather than duplicate.
+		return _handler._canvas_sized_cel_copy(_project, cel)
 
 	func has_layer(layer) -> bool:
 		if _project == null:
