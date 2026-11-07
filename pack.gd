@@ -18,6 +18,7 @@ func _init():
 	packer.add_file(prefix + "Main.tscn", plugin_dir + "Main.tscn")
 	packer.add_file(prefix + "Main.gd", plugin_dir + "Main.gd")
 	packer.add_file(prefix + "command_handler.gd", plugin_dir + "command_handler.gd")
+	packer.add_file(prefix + "skeletor_adapter.gd", plugin_dir + "skeletor_adapter.gd")
 
 	# Package GIF exporter shaders to fix root/relative load resolution in Godot 4
 	# Pixelorama's own source tree supplies the GIF exporter shaders. If they are missing the

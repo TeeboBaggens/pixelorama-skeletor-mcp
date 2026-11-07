@@ -10,6 +10,9 @@ const DEFAULT_TIMEOUT_MS = parseInt(process.env.PIX_MCP_TIMEOUT_MS || "120000", 
 
 export interface BridgeResponse {
   success: boolean;
+  // Each tool returns its own ad-hoc payload shape, so this stays deliberately untyped rather
+  // than forcing every call site to cast away `unknown`.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   data?: Record<string, any>;
   error?: string;
 }

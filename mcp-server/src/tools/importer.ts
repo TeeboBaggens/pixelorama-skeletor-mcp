@@ -33,7 +33,6 @@ function decodePNG(buffer: Buffer): DecodedPNG {
   let offset = 8;
   let width = 0;
   let height = 0;
-  let colorType = 0;
   let bpp = 4;
   const idatBuffers: Buffer[] = [];
 
@@ -46,7 +45,7 @@ function decodePNG(buffer: Buffer): DecodedPNG {
     if (type === "IHDR") {
       width = data.readUInt32BE(0);
       height = data.readUInt32BE(4);
-      colorType = data.readUInt8(9);
+      const colorType = data.readUInt8(9);
       bpp = colorType === 6 ? 4 : colorType === 2 ? 3 : 0;
       if (bpp === 0) {
         throw new Error("Only standard RGB (colorType=2) or RGBA (colorType=6) PNGs are supported.");

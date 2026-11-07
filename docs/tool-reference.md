@@ -1161,3 +1161,168 @@ Scan and remove 1px orphan noise pixels.
 Quantize and snap canvas pixels to the nearest colors in a target palette.
 
 
+
+---
+
+## 18. Skeletal Animation (Skeletor)
+
+Requires the [Skeletor](https://github.com/Variable-Interactive/Skeletor) extension installed and
+enabled alongside `PixMcpBridge.pck`. A bone is a **group layer**; nesting group layers builds the
+hierarchy; each frame's pose lives in that frame's cel metadata. Architecture and the upstream
+quirks worked around are documented in [Skeletor Integration](skeletor-integration.md).
+
+### `get_skeletor_state`
+Report whether Skeletor is installed and compatible, the pose layer, the current view mode, every bone with its pivot and rotation, and which frames are missing a skeleton. Call this first — the other tools depend on a rig existing.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `frame` | number | current | Frame to report bones for |
+
+```json
+{
+  "success": true,
+  "data": {
+    "installed": true,
+    "adapter_ok": true,
+    "pose_layer": "Pose Layer",
+    "pose_layer_index": 5,
+    "mode": "pose",
+    "frame": 0,
+    "frame_count": 8,
+    "bones": [
+      { "name": "Torso", "parent": "", "pivot": { "x": 32, "y": 34 }, "rotation_deg": 0, "layer_index": 4 },
+      { "name": "Arm_R", "parent": "Torso", "pivot": { "x": 38, "y": 26 }, "rotation_deg": 90, "layer_index": 3 }
+    ],
+    "frames_without_skeleton": []
+  }
+}
+```
+
+`mode` is `"draw"`, `"pose"`, `"mixed"` (both the pose layer and a root bone group are visible — an
+export would show the artwork twice) or `"unknown"` (no pose layer yet).
+
+### `setup_skeletor_rig`
+Create a rig: one group layer per bone in the requested hierarchy, a pixel layer inside each bone to draw that body part into, and the Pose Layer that posed results are rendered to. Bones may be listed in any order as long as every named parent is in the list or already exists.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `bones` | array | — | Bone specs (below) |
+| `pose_layer_name` | string | `"Pose Layer"` | Must contain "Pose Layer" — Skeletor identifies the layer by name on first discovery |
+
+Each bone spec:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `name` | string | — | Bone name; also the group layer's name, so it must be unique |
+| `parent` | string | `""` | Parent bone's name; omit for a root bone |
+| `pivot` | `{x,y}` \| `[x,y]` | `(0,0)` | Pivot in canvas coordinates — the joint this bone turns around |
+| `sprite_layer` | boolean | `true` | Create a pixel layer inside the bone to draw into |
+| `sprite_layer_name` | string | `"<bone>_Sprite"` | Name for that pixel layer |
+
+```json
+{
+  "success": true,
+  "data": {
+    "bones": [
+      { "name": "Torso", "parent": "", "layer_index": 4, "layer_id": "layer_...",
+        "sprite_layer": "Torso_Sprite", "sprite_layer_index": 1,
+        "pivot": { "x": 32, "y": 34 }, "rotation_deg": 0 }
+    ],
+    "pose_layer": "Pose Layer",
+    "pose_layer_index": 5,
+    "pose_layer_created": true,
+    "frame": 0
+  }
+}
+```
+
+Draw each body part into its `sprite_layer_index` — artwork outside a bone's group is not transformed by that bone.
+
+### `apply_bone_pose`
+Pose one or more bones on a single frame and render the result into the pose layer. Rotation is in degrees around the bone's pivot and is inherited by child bones.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `bones` | array | — | Pose specs (below) |
+| `bone` | string | — | Shorthand for a single bone: its name, with `rotation_deg` / `pivot` / `translate` alongside |
+| `frame` | number | current | Frame to pose |
+| `quick_set_pivot` | boolean | `false` | For bones given no pivot, centre it on that bone's own artwork (Skeletor's "quick set bones") |
+| `render` | boolean | `true` | Render the posed frame |
+
+Each pose spec:
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Bone name |
+| `rotation_deg` | number | Rotation around the pivot, in degrees |
+| `pivot` | `{x,y}` \| `[x,y]` | Move the pivot to this canvas coordinate |
+| `translate` | `{x,y}` \| `[x,y]` | Offset the bone from its pivot, in pixels |
+| `rotate_origin_deg` | number | Base gizmo angle; `rotation_deg` is relative to it |
+| `transformation_algorithm` | number | `0` cleanEdge, `1` OmniScale, `2` nearest-neighbour |
+
+```json
+{
+  "success": true,
+  "data": {
+    "frame": 0,
+    "bones": [ { "name": "Arm_R", "parent": "Torso", "pivot": { "x": 38, "y": 26 }, "rotation_deg": 45 } ],
+    "rendered": [0],
+    "pose_layer_was_hidden": true
+  }
+}
+```
+
+`pose_layer_was_hidden: true` means the project is in the draw view, so the render was stored but is not shown — call `set_skeletor_mode` with `"pose"` to see or export it.
+
+### `generate_skeletor_tween`
+Interpolate bone poses across the frames between two keyframes and render each one. Pose `from_frame` and `to_frame` with `apply_bone_pose` first. Skeletor's own tween is hardcoded to linear/ease-in; this one is reimplemented, so every Godot curve is available.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `from_frame` | number | — | Start keyframe (already posed) |
+| `to_frame` | number | — | End keyframe (already posed); at least 2 frames after `from_frame` |
+| `bones` | string[] | all | Bone names to tween; defaults to every bone present at both keyframes |
+| `transition` | string | `"linear"` | `linear`, `sine`, `quad`, `cubic`, `quart`, `quint`, `expo`, `circ`, `back`, `elastic`, `bounce`, `spring` |
+| `easing` | string | `"in_out"` | `in`, `out`, `in_out`, `out_in` |
+| `render` | boolean | `true` | Render every frame in the range |
+
+Interpolates `gizmo_origin`, `gizmo_rotate_origin`, `start_point`, `bone_rotation` and `gizmo_length`. The name fields and the discrete `transformation_algorithm` are left alone.
+
+```json
+{
+  "success": true,
+  "data": {
+    "from_frame": 0,
+    "to_frame": 7,
+    "transition": "sine",
+    "easing": "in_out",
+    "bones": ["Arm_R"],
+    "tweened_frames": [1, 2, 3, 4, 5, 6],
+    "rendered": [0, 1, 2, 3, 4, 5, 6, 7],
+    "rotation_deg_timeline": [
+      { "frame": 0, "Arm_R": 0.0 },  { "frame": 1, "Arm_R": 4.5 },
+      { "frame": 2, "Arm_R": 16.9 }, { "frame": 3, "Arm_R": 35.0 },
+      { "frame": 4, "Arm_R": 55.0 }, { "frame": 5, "Arm_R": 73.1 },
+      { "frame": 6, "Arm_R": 85.5 }, { "frame": 7, "Arm_R": 90.0 }
+    ]
+  }
+}
+```
+
+### `set_skeletor_mode`
+Switch between the draw view (source artwork visible, posed result hidden) and the pose view (posed result visible, source artwork hidden). Skeletor normally does this when you select the pose layer in the UI, which never happens over MCP — so switch to `pose` before exporting, or the export shows the unposed artwork on top of the posed result.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `mode` | string | — | `"pose"` or `"draw"` |
+
+```json
+{
+  "success": true,
+  "data": {
+    "mode": "pose",
+    "pose_layer_visible": true,
+    "root_groups_toggled": ["Torso"]
+  }
+}
+```

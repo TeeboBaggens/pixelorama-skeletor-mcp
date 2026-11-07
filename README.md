@@ -10,8 +10,9 @@
 [![GitHub stars](https://img.shields.io/github/stars/abidoo22/Pixelorama-MCP?style=flat&logo=github)](https://github.com/abidoo22/Pixelorama-MCP/stargazers)
 [![MCP Server](https://img.shields.io/badge/MCP-Model%20Context%20Protocol-blueviolet)](https://modelcontextprotocol.io/)
 [![Pixelorama](https://img.shields.io/badge/Pixelorama-v1.1.10%20%7C%20v1.2%2B-orange)](https://www.pixelorama.org/)
-[![Node.js](https://img.shields.io/badge/node-%E2%89%A518-brightgreen)](https://nodejs.org/)
-[![Tools](https://img.shields.io/badge/MCP%20tools-70%2B%20(106%20total)-blue)](docs/tool-reference.md)
+[![Node.js](https://img.shields.io/badge/node-%E2%89%A520.19-brightgreen)](https://nodejs.org/)
+[![Tools](https://img.shields.io/badge/MCP%20tools-75%2B%20(111%20total)-blue)](docs/tool-reference.md)
+[![Skeletor](https://img.shields.io/badge/Skeletor-skeletal%20animation-9cf)](docs/skeletor-integration.md)
 
 <img src="moonlit_sanctuary_3x.png" alt="Moonlit Sanctuary: a pixel art lakeside pagoda under a full moon, drawn by an AI inside Pixelorama" width="100%">
 
@@ -38,6 +39,7 @@ You describe your creative vision in natural language. The AI computes geometry,
 - [🖼️ Image Importer & Pixelizer](#️-image-importer--pixelizer)
 - [🏗️ How It Works](#️-how-it-works)
 - [🛠️ Toolset Overview](#️-toolset-overview)
+- [🦴 Skeletal Animation with Skeletor](#-skeletal-animation-with-skeletor)
 - [🗂️ Documentation](#️-documentation)
 - [🔧 Troubleshooting & FAQ](#-troubleshooting--faq)
 - [🤝 Contributing](#-contributing)
@@ -54,6 +56,7 @@ You describe your creative vision in natural language. The AI computes geometry,
 - 🌈 **Advanced Shading & Gradients:** Non-destructive radial and linear gradients with Bayer dithering, alpha blending (`blend: true`), elliptical falloff, smoothstep curves, and bloom glow.
 - 📐 **Composition & Scene Planning (`generate_scene_plan`):** Generates horizon placement, rule-of-thirds focal points, value silhouettes, depth hierarchies, and layer plans for large scenes.
 - 👁️ **Visual Inspection & Magnification:** `capture_canvas_image` supports custom bounding regions, downscaling (< 1.0) to save tokens, and nearest-neighbor magnification (up to 32×) for pixel-level multimodal visual inspection.
+- 🦴 **Skeletal Animation (Skeletor):** Build bone hierarchies, pose joints by angle, and tween poses across frames with any Godot easing curve — driving the [Skeletor](https://github.com/Variable-Interactive/Skeletor) extension, which has no API or MCP server of its own.
 - 🎞️ **Animation & Cel Cloning:** Create walk cycles, frame tweens, onion skinning, and frame-rate configs with deep-cloning support.
 - 📦 **Godot 4 Game Asset Pipeline:** Direct export to Godot 4 `SpriteFrames` (`.tres`), Godot 4 `TileSet`, APNG, GIF, and spritesheets.
 
@@ -120,8 +123,9 @@ Setting up takes under 5 minutes.
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) (v18 or newer)
+- [Node.js](https://nodejs.org/) (v22 or newer — the dev toolchain needs `^20.19 || ^22.13 || >=24`)
 - [Pixelorama](https://www.pixelorama.org/) (**v1.1.10** or **v1.2+**)
+- Optional: [Skeletor](https://github.com/Variable-Interactive/Skeletor) for skeletal animation — see [Skeletal Animation with Skeletor](#-skeletal-animation-with-skeletor)
 - An MCP Client: [Claude Desktop](https://claude.ai/download), [Cursor](https://cursor.com/), [Antigravity](https://github.com/), or any MCP-compatible environment
 
 ### 1. Clone & Build the MCP Server
@@ -286,7 +290,93 @@ Pixelorama-MCP exposes over 70 tools organized by domain:
 - `export_godot_spriteframes`: Ready-to-use Godot 4 `SpriteFrames` resource (`.tres`).
 - `export_godot_tileset`: Ready-to-use Godot 4 `TileSet` resource.
 
+### 8. Skeletal Animation (Skeletor)
+- `get_skeletor_state`: Report whether Skeletor is installed and compatible, plus the rig's bones, pivots, pose layer and view mode.
+- `setup_skeletor_rig`: Build a bone hierarchy with a drawable sprite layer per bone and the pose layer.
+- `apply_bone_pose`: Rotate, translate or re-pivot bones on one frame and render the posed result.
+- `generate_skeletor_tween`: Interpolate poses between two keyframes using any Godot easing curve.
+- `set_skeletor_mode`: Switch between the draw view (source artwork) and the pose view (posed result).
+
 See the full [Tool Reference](docs/tool-reference.md) for argument tables and JSON examples.
+
+---
+
+## 🦴 Skeletal Animation with Skeletor
+
+[Skeletor](https://github.com/Variable-Interactive/Skeletor) adds bone-based animation to Pixelorama:
+a bone is a group layer, nesting group layers builds the hierarchy, and each frame's pose is stored
+in that frame's cel metadata. It ships no API and no MCP server, so these five tools drive it
+directly — both Skeletor and the pix-MCP bridge are Pixelorama extensions loaded into the same
+Godot process, which lets the bridge reach Skeletor's manager through the scene tree. **No fork of
+Skeletor or of Pixelorama is required.**
+
+<img src="docs/spike-arm-swing.gif" alt="An eight-frame arm swing: a blue torso with an orange arm pivoting at the shoulder from horizontal to vertical with sine ease-in-out" width="256">
+
+### Setup
+
+Skeletor is optional — the other tools work without it. To enable it:
+
+1. Download `Skeletor.pck` from the [Skeletor releases](https://github.com/Variable-Interactive/Skeletor/releases).
+2. Drop it into Pixelorama's `extensions/` folder, next to `PixMcpBridge.pck`.
+3. Enable it in **Edit → Preferences → Extensions** (or add `Skeletor=true` under `[extensions]` in `config.ini`) and restart Pixelorama.
+4. Run `get_skeletor_state` to confirm the bridge can see it.
+
+On macOS the extensions folder is `~/Library/Application Support/pixelorama/extensions`.
+`scripts/dev/setup-macos.sh` does all of this for a development checkout.
+
+### Workflow
+
+```
+setup_skeletor_rig       bones as nested group layers + a sprite layer each + the Pose Layer
+   ↓
+draw_rect / draw_pixels  paint each body part into its own sprite layer
+   ↓
+apply_bone_pose          set the pose on the first and last frame (your keyframes)
+   ↓
+generate_skeletor_tween  interpolate every frame in between, with easing
+   ↓
+set_skeletor_mode        switch to the pose view
+   ↓
+export_gif               export the animation
+```
+
+A worked example, posing a two-bone arm across eight frames:
+
+```jsonc
+// 1. Bones may be listed in any order, as long as every named parent is in the list.
+setup_skeletor_rig {
+  "bones": [
+    { "name": "Torso", "pivot": { "x": 32, "y": 34 } },
+    { "name": "Arm_R", "parent": "Torso", "pivot": { "x": 38, "y": 26 } }
+  ]
+}
+// -> Torso @ layer 4 (sprite Torso_Sprite @ 1), Arm_R @ layer 3 (sprite Arm_R_Sprite @ 2)
+
+// 2. Paint into the sprite layers, then duplicate the frame up to eight.
+
+// 3. Keyframes at both ends.
+apply_bone_pose { "bone": "Arm_R", "rotation_deg": 0,  "frame": 0 }
+apply_bone_pose { "bone": "Arm_R", "rotation_deg": 90, "frame": 7 }
+
+// 4. Fill in the middle. Skeletor's own tween is hardcoded to linear/ease-in;
+//    because this one is reimplemented, every Godot curve is available.
+generate_skeletor_tween {
+  "from_frame": 0, "to_frame": 7,
+  "bones": ["Arm_R"], "transition": "sine", "easing": "in_out"
+}
+// -> 0.0  4.5  16.9  35.0  55.0  73.1  85.5  90.0 degrees
+
+// 5. Show the posed result rather than the source artwork, then export.
+set_skeletor_mode { "mode": "pose" }
+```
+
+**Rotation is inherited**: rotating `Torso` carries `Arm_R` and its artwork with it. Pivots are in
+canvas coordinates — put each one on the joint the bone turns around (a shoulder, an elbow), not on
+the centre of the sprite. Pass `"quick_set_pivot": true` to `apply_bone_pose` to centre any pivot you
+have not set on that bone's own artwork, which is Skeletor's "quick set bones".
+
+Architecture, Skeletor's data model and the full reverse-engineering notes are in
+[Skeletor Integration](docs/skeletor-integration.md).
 
 ---
 
@@ -295,6 +385,7 @@ See the full [Tool Reference](docs/tool-reference.md) for argument tables and JS
 - 📖 [Getting Started Guide](docs/getting-started.md) — Step-by-step installation and client setup.
 - 🛠️ [Tool Reference](docs/tool-reference.md) — Exhaustive documentation of all tools and schemas.
 - 🎨 [Agentic Drawing Playbook](AGENTIC_DRAWING_PLAYBOOK.md) — Shading rules, color ramps, geometry recipes, and batching tricks for LLM agents.
+- 🦴 [Skeletor Integration](docs/skeletor-integration.md) — Architecture, Skeletor's data model, and the upstream quirks worked around.
 - 🔌 [Plugin Setup & Compilation](docs/plugin-setup.md) — Building and packing the `.pck` file with Godot Engine.
 - 📂 [Example Scripts](docs/examples/) — Scripts demonstrating asset imports, banners, and tilesets.
 
@@ -302,15 +393,151 @@ See the full [Tool Reference](docs/tool-reference.md) for argument tables and JS
 
 ## 🔧 Troubleshooting & FAQ
 
+### Connection & setup
+
 #### The AI client cannot see the tools
 - Ensure you ran `npm run build` inside `mcp-server/`.
 - Verify the path in your client configuration is an **absolute path** to `mcp-server/dist/index.js`.
 - Fully restart your AI client after editing configuration.
 
+#### `npm install` fails with `ERESOLVE` on eslint
+- Node 18 and 20 are below eslint 10's floor (`^20.19 || ^22.13 || >=24`). Use Node 22 or newer.
+
 #### Pixelorama is open, but commands time out
 - Verify that `PixMcpBridge.pck` is enabled under **Edit → Preferences → Extensions**.
 - Check that Pixelorama was restarted after enabling the extension.
 - Test `curl http://127.0.0.1:7373/health` to confirm the local port is reachable.
+
+#### The extension is installed but never starts
+Extensions are **disabled by default**. Dropping a `.pck` into `extensions/` loads it but does not
+enable it — `[extensions] <name>=true` must be set in `config.ini`, or the extension ticked in
+**Edit → Preferences → Extensions**. The key is the `name` field of `extension.json`, which must
+also match the `.pck` filename.
+
+#### The extension vanished after a crash
+If Pixelorama is killed rather than quit, stale `.running` and `extensions/Monitoring.ini` files
+make the next launch treat the session as a crash and **quarantine every extension** into
+`give_in_bug_report/`. Delete both files and relaunch. `scripts/dev/run-pixelorama.sh` does this
+automatically.
+
+---
+
+### Drawing & export
+
+#### Drawing reports `pixels_drawn: 0, pixels_clipped: N` — nothing appears
+Fixed in this fork; if you see it, the bridge build predates the fix.
+
+Pixelorama 1.2 made cels **sparse**: `cel.image` holds only the used content and is positioned on
+the canvas by `cel.offset`, and an empty cel is a **1×1** placeholder rather than a canvas-sized
+image. Code that writes straight into `cel.get_image()` using canvas coordinates therefore writes
+outside that 1×1 image, and every pixel is silently clipped — which broke the bridge's *entire*
+drawing surface against Pixelorama 1.2.x. The bridge now normalises a cel to a full-canvas image at
+offset zero before any read or write (`_ensure_full_canvas_cel`).
+
+Writing through the cel's own growing primitives is the alternative, if you are scripting this
+yourself via `eval_gdscript`:
+
+```gdscript
+var src = Image.create_empty(project.size.x, project.size.y, false, Image.FORMAT_RGBA8)
+# ...draw into src in canvas coordinates...
+cel.blit_image_to_cel(src)   # grows the cel and sets its offset for you
+cel.update_texture()
+```
+
+#### Exported images show artwork stamped at the top-left corner
+Same sparse-cel root cause, on the read side: the frame compositor blitted every cel at
+`Vector2i.ZERO` instead of at `cel.offset`, so each layer's content landed at the canvas origin
+rather than where it was drawn. Fixed in this fork.
+
+#### A layer command returns an empty `{}` for a layer that was clearly created
+`ProjectAPI.current_layer` is read-only. `add_layer` and `create_layer_group` both assigned to it,
+which raised `Invalid assignment of property or key 'current_layer' ... on a base object of type
+'RefCounted (ProjectAPI)'` and aborted the command *after* creating the layer but *before*
+returning — so the caller saw an empty response for a layer that exists. Fixed in this fork.
+
+#### A new layer got the wrong name, or a group got named instead
+`ExtensionsApi.add_new_layer()` renames `project.layers[above_layer + 1]`, which assumes the new
+layer lands *above* the anchor. That only holds when it does **not** nest into a group: when it
+does, it is inserted *at* `above_layer` and the group shifts up, so the rename lands on the group.
+The bridge now adds layers unnamed and renames whichever layer actually appeared.
+
+#### `delete_frame` returns nothing but the frame is gone
+Same read-only-property bug as above, on `current_frame`: `ProjectAPI` exposes `current_project`
+as its only setter, so `_api.project.current_frame = ...` raised and aborted the command after the
+frame had already been removed. Fixed in this fork.
+
+#### `set_tile_mode` or `set_symmetry_guide` fails with no message
+Both were written against Pixelorama 1.1's `Project` API:
+- **`set_tile_mode`** used `project.tile_mode`, which moved to `project.tiles.mode` in 1.2
+  (`Tiles.MODE` = `NONE, BOTH, X_AXIS, Y_AXIS`). Fixed in this fork.
+- **`set_symmetry_guide`** used `project.show_x_symmetry` / `show_y_symmetry`, which no longer
+  exist: guide visibility moved onto the `SymmetryGuide` nodes (`project.x_symmetry_axis.visible`,
+  gated by `Global.show_x_symmetry_axis and Global.show_guides`) and the mirroring itself onto
+  `Tools.horizontal_mirror` / `vertical_mirror`. **Still only partly working** — it sets the
+  symmetry points and returns a `warning`, but does not toggle the guides. Migrating it needs a
+  decision on which axis "horizontal" names, since upstream's *horizontal* mirror drives the *y*
+  axis guide.
+
+#### `switch_palette` reports `Palette 'Default' not found`
+There is no palette named "Default". Call `list_palettes` for the installed names — a stock
+install ships "Pixelorama" and "DawnBringer 32".
+
+#### A duplicated frame lost its extension data
+`duplicate_frame` copied cel images but neither the sparse-cel `offset` nor cel **metadata**.
+Extensions keep per-frame state in cel metadata — Skeletor stores each frame's entire skeleton
+there — so duplicating a frame silently produced one with no pose data at all. Fixed in this fork.
+
+---
+
+### Skeletor
+
+#### `get_skeletor_state` says Skeletor is not installed
+`Skeletor.pck` must be in the same `extensions/` folder as `PixMcpBridge.pck` **and** enabled —
+see "The extension is installed but never starts" above. Restart Pixelorama after enabling it.
+
+#### `get_skeletor_state` says Skeletor is installed but incompatible
+The bridge reaches Skeletor by duck-typing its manager out of the scene tree, and checks on every
+call that the methods and properties it needs are still present. This message means a Skeletor
+update moved something; the reported names say what. Everything that touches Skeletor lives in
+`pixelorama-plugin/skeletor_adapter.gd`, so that is the one file to update.
+
+#### Posing or tweening appears to do nothing
+`generate_pose()` returns silently unless the pose layer is visible, so a render issued while the
+project is in the draw view produces no visible change. The bridge shows the pose layer for the
+render and restores the previous visibility afterwards, and reports `pose_layer_was_hidden` when it
+did. The pixels are in the cel either way — call `set_skeletor_mode` with `"pose"` to see them.
+
+#### An export shows the unposed artwork on top of the posed result
+Skeletor swaps between its draw view and pose view in `manage_layer_visibility()`, which only runs
+when the **UI** changes the selected layer. Driven over MCP nothing ever selects the pose layer, so
+the source sprites stay visible alongside the rendered pose. Call `set_skeletor_mode` with
+`"mode": "pose"` before exporting or screenshotting.
+
+#### A pivot set earlier reverted to (0,0)
+Skeletor treats its in-memory bone set as the authority for the *current* frame: it renders from
+it, and `update_frame_data()` ends by writing it straight back to cel metadata. So a metadata-only
+write is reverted by the next catalogue pass. The bridge re-syncs that in-memory set on every
+write. If you are scripting Skeletor yourself via `eval_gdscript`, you must do the same.
+
+#### Frames in the middle of an animation have no skeleton
+Each frame's skeleton lives in that frame's cel metadata, and frames created by some paths start
+without any. The bridge seeds them from the nearest frame that has one before posing or tweening;
+`get_skeletor_state` lists them under `frames_without_skeleton`.
+
+#### Renders of *other* frames stopped working too
+A failsafe in `generate_pose()` checks whether the **current** frame's in-memory bones are empty
+and, if so, renders an empty image to the current frame and returns — even when asked for a
+different frame. One skeleton-less current frame therefore suppresses every render and blanks that
+frame. The bridge populates the in-memory set before rendering anything.
+
+#### A bone's rotation does not move its artwork
+A bone is a **group layer**; only artwork on layers *inside* that group is transformed. If you drew
+into a layer outside the bone group, nothing will move. `setup_skeletor_rig` creates a sprite layer
+inside each bone for exactly this reason — check `sprite_layer_index` in its response and draw there.
+
+---
+
+### General
 
 #### Which AI models produce the best art?
 - Models with strong spatial reasoning and mathematical capability (such as Claude 3.5 Sonnet, Claude 3.7 Sonnet, GPT-4o, and Gemini 1.5 Pro) produce remarkable shading, dithering, and composition.
