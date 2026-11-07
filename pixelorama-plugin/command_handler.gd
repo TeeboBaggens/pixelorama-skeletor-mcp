@@ -143,6 +143,8 @@ func _register_tools() -> void:
 	_tool_registry["apply_bone_pose"] = Callable(self, "_cmd_apply_bone_pose")
 	_tool_registry["generate_skeletor_tween"] = Callable(self, "_cmd_generate_skeletor_tween")
 	_tool_registry["set_skeletor_mode"] = Callable(self, "_cmd_set_skeletor_mode")
+	_tool_registry["export_skeleton_animation"] = Callable(self, "_cmd_export_skeleton_animation")
+	_tool_registry["import_skeleton_animation"] = Callable(self, "_cmd_import_skeleton_animation")
 
 	print(LOG_TAG + "Registered %d tools" % _tool_registry.size())
 
@@ -6446,4 +6448,59 @@ func _cmd_set_skeletor_mode(params: Dictionary) -> Dictionary:
 	var result: Dictionary = _skeletor.set_view_mode(project, mode == "pose")
 	if result.has("error"):
 		return {"success": false, "error": result["error"]}
+	return {"success": true, "data": result}
+
+
+# ─────────────────────────────────────────────
+# export_skeleton_animation / import_skeleton_animation
+# ─────────────────────────────────────────────
+
+func _cmd_export_skeleton_animation(params: Dictionary) -> Dictionary:
+	var ctx := _skeletor_context()
+	if ctx.has("error"):
+		return {"success": false, "error": ctx["error"]}
+	var project = ctx["project"]
+
+	var path: String = str(params.get("path", ""))
+	if path.is_empty():
+		return {"success": false, "error": "Parameter 'path' is required (e.g. '/tmp/walk.skeletor')"}
+	if not path.to_lower().ends_with(".skeletor"):
+		path += ".skeletor"
+
+	_skeletor.catalogue(project)
+	var result: Dictionary = _skeletor.export_animation(project, path)
+	if result.has("error"):
+		return {"success": false, "error": result["error"]}
+	return {"success": true, "data": result}
+
+
+func _cmd_import_skeleton_animation(params: Dictionary) -> Dictionary:
+	var ctx := _skeletor_context()
+	if ctx.has("error"):
+		return {"success": false, "error": ctx["error"]}
+	var project = ctx["project"]
+
+	var path: String = str(params.get("path", ""))
+	if path.is_empty():
+		return {"success": false, "error": "Parameter 'path' is required"}
+
+	var file_result: Dictionary = _skeletor.read_animation_file(path)
+	if file_result.has("error"):
+		return {"success": false, "error": file_result["error"]}
+
+	_skeletor.catalogue(project)
+	_skeletor_ensure_skeletons(project)
+
+	var include_pivots: bool = bool(params.get("pivots", false))
+	var result: Dictionary = _skeletor.import_animation(
+		project, file_result["frames"], include_pivots
+	)
+	if result.has("error"):
+		return {"success": false, "error": result["error"]}
+
+	if bool(params.get("render", true)):
+		var render_result: Dictionary = _skeletor.render_frames(project, result["applied_frames"])
+		if render_result.has("error"):
+			return {"success": false, "error": render_result["error"]}
+		result.merge(render_result, true)
 	return {"success": true, "data": result}

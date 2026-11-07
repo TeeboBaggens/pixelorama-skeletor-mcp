@@ -388,3 +388,168 @@ func _refresh_canvas() -> void:
 	if "update_all_layers" in canvas:
 		canvas.update_all_layers = true
 	canvas.queue_redraw()
+
+
+# ─────────────────────────────────────────────
+# ANIMATION TRANSFER (.skeletor files)
+# ─────────────────────────────────────────────
+#
+# Skeletor defines a `.skeletor` format -- a ConfigFile with one section per frame, key
+# "skeleton", holding that frame's serialized bone dictionary -- plus an exporter and a
+# "Load Skeleton" menu item. Both are broken in v0.17-v0.19: Main.gd calls
+# skeleton_manager.load_frame_info() and .current_frame_data, neither of which exists since the
+# manager was refactored in b0fe3b8 (2025-11-24). The export silently writes a 0-byte file and
+# reports success; the import dereferences the resulting null and segfaults Pixelorama.
+#
+# These read and write the same format, so files stay interchangeable if upstream fixes theirs.
+
+## Fields that describe a pose. `bone_name` and `parent_bone_name` are deliberately excluded:
+## identity and hierarchy always come from the target rig, never from the file.
+const POSE_FIELDS: Array[String] = [
+	"bone_rotation",
+	"gizmo_rotate_origin",
+	"start_point",
+	"transformation_algorithm",
+	"gizmo_length",
+]
+
+## Pivot, in absolute canvas coordinates. Copied only on request -- see import_animation().
+const PIVOT_FIELD: String = "gizmo_origin"
+
+
+## Writes every frame's skeleton to a `.skeletor` file. Returns {"error": ...} or a summary.
+func export_animation(project, path: String) -> Dictionary:
+	if manager() == null:
+		return {"error": "Skeletor manager not available"}
+	if pose_layer(project) == null:
+		return {"error": "Project has no pose layer"}
+	var save_file := ConfigFile.new()
+	var frames_written := []
+	var bone_names := {}
+	for frame_idx in range(project.frames.size()):
+		var frame_data: Dictionary = data_at(project, frame_idx)
+		if frame_data.is_empty():
+			continue
+		save_file.set_value(str(frame_idx), "skeleton", frame_data)
+		frames_written.append(frame_idx)
+		for bone_name in frame_data.keys():
+			bone_names[str(bone_name)] = true
+	if frames_written.is_empty():
+		return {"error": "No frame in this project has a skeleton to export"}
+	var code := save_file.save(path)
+	if code != OK:
+		return {"error": "Could not write '%s' (error %d)" % [path, code]}
+	var written_size := 0
+	if FileAccess.file_exists(path):
+		var f := FileAccess.open(path, FileAccess.READ)
+		written_size = f.get_length()
+		f.close()
+	return {
+		"path": path,
+		"bytes": written_size,
+		"frames": frames_written,
+		"bones": bone_names.keys(),
+	}
+
+
+## Reads a `.skeletor` file into {frame_index: {bone_name: {field: value}}}.
+func read_animation_file(path: String) -> Dictionary:
+	if not FileAccess.file_exists(path):
+		return {"error": "No such file: %s" % path}
+	var file := ConfigFile.new()
+	var code := file.load(path)
+	if code != OK:
+		return {"error": "Could not read '%s' as a .skeletor file (error %d)" % [path, code]}
+	var frames := {}
+	for section in file.get_sections():
+		var frame_idx = str_to_var(section)
+		if typeof(frame_idx) != TYPE_INT:
+			continue
+		# The format writes one key, "skeleton"; fall back to the first key defensively.
+		var value = file.get_value(section, "skeleton", {})
+		if typeof(value) != TYPE_DICTIONARY or value.is_empty():
+			var keys := file.get_section_keys(section)
+			if keys.size() > 0:
+				value = file.get_value(section, keys[0], {})
+		if typeof(value) == TYPE_DICTIONARY and not value.is_empty():
+			frames[int(frame_idx)] = value
+	if frames.is_empty():
+		return {"error": "'%s' contains no frame data (a 0-byte file is what Skeletor's own broken exporter produces)" % path}
+	return {"frames": frames}
+
+
+## Applies an animation onto this project's rig, matching bones by name.
+##
+## Bones the target does not have are skipped, and the target's own hierarchy is always kept --
+## `parent_bone_name` is never taken from the file, so a rig with the same bone names but a
+## different parenting still receives the motion.
+##
+## `include_pivots` is false by default. `gizmo_origin` is an ABSOLUTE canvas coordinate, so
+## copying it moves every joint to wherever the source character's joints were; that is only
+## correct when the two rigs share proportions and canvas size. Leaving it off transfers the
+## motion while each rig keeps its own joint positions, which is what retargeting usually means.
+func import_animation(project, frames_data: Dictionary, include_pivots: bool) -> Dictionary:
+	var mgr = manager()
+	if mgr == null:
+		return {"error": "Skeletor manager not available"}
+	if pose_layer(project) == null:
+		return {"error": "Project has no pose layer"}
+
+	var target_bones: Dictionary = bones_at(project, project.current_frame)
+	if target_bones.is_empty():
+		for frame_idx in range(project.frames.size()):
+			target_bones = bones_at(project, frame_idx)
+			if not target_bones.is_empty():
+				break
+	if target_bones.is_empty():
+		return {"error": "This project has no rig to apply the animation to"}
+
+	var matched := {}
+	var unmatched_in_file := {}
+	var applied_frames := []
+	var skipped_frames := []
+
+	var frame_keys := frames_data.keys()
+	frame_keys.sort()
+	for frame_idx in frame_keys:
+		var f := int(frame_idx)
+		if f < 0 or f >= project.frames.size():
+			skipped_frames.append(f)
+			continue
+		var frame_bones: Dictionary = bones_at(project, f)
+		if frame_bones.is_empty():
+			continue
+		var source: Dictionary = frames_data[frame_idx]
+		for bone_name in source.keys():
+			var name := str(bone_name)
+			if not frame_bones.has(name):
+				unmatched_in_file[name] = true
+				continue
+			matched[name] = true
+			# Feed SkeletonBone.deserialize() only the fields we mean to transfer; it leaves
+			# every field absent from the dictionary at its current value, and already accepts
+			# both the string-encoded and typed forms a ConfigFile may hold.
+			var incoming: Dictionary = source[bone_name]
+			var filtered := {}
+			for field in POSE_FIELDS:
+				if incoming.has(field):
+					filtered[field] = incoming[field]
+			if include_pivots and incoming.has(PIVOT_FIELD):
+				filtered[PIVOT_FIELD] = incoming[PIVOT_FIELD]
+			frame_bones[name].deserialize(filtered, true)
+		save_bones(project, frame_bones, f)
+		applied_frames.append(f)
+
+	var unmatched_in_rig := []
+	for name in target_bones.keys():
+		if not matched.has(str(name)):
+			unmatched_in_rig.append(str(name))
+
+	return {
+		"applied_frames": applied_frames,
+		"skipped_frames": skipped_frames,
+		"bones_applied": matched.keys(),
+		"bones_in_file_not_in_rig": unmatched_in_file.keys(),
+		"bones_in_rig_not_in_file": unmatched_in_rig,
+		"pivots_copied": include_pivots,
+	}
