@@ -258,6 +258,66 @@ export function registerSkeletorTools(server: McpServer): void {
   );
 
   server.tool(
+    "export_skeleton_animation",
+    "Save the whole rig's animation — every frame's bone poses — to a .skeletor file, so it can be reapplied to another character. Writes the same ConfigFile format Skeletor itself defines.",
+    {
+      path: z.string().describe("Where to write the file, e.g. '/tmp/walk.skeletor'. The .skeletor extension is added if missing."),
+    },
+    async ({ path }) => {
+      const result = await sendCommand("export_skeleton_animation", { path });
+      if (!result.success) return text(`❌ ${result.error}`);
+      const d = result.data ?? {};
+      return text(
+        [
+          `✅ Exported ${(d.frames ?? []).length} frame(s) to ${d.path} (${d.bytes} bytes)`,
+          `Bones: ${(d.bones ?? []).join(", ")}`,
+          "",
+          "Apply it to another rig with import_skeleton_animation — bones are matched by name.",
+        ].join("\n")
+      );
+    }
+  );
+
+  server.tool(
+    "import_skeleton_animation",
+    "Apply a .skeletor animation to this project's rig, matching bones BY NAME. Bones the rig does not have are skipped, and the rig keeps its own hierarchy, so a character with the same bone names but different proportions or parenting still receives the motion.",
+    {
+      path: z.string().describe("The .skeletor file to apply"),
+      pivots: coerceBool()
+        .optional()
+        .describe(
+          "Also copy each bone's pivot from the file (default false). Pivots are absolute canvas coordinates, so this only makes sense when both rigs share proportions and canvas size; leaving it off keeps each rig's own joint positions, which is normally what you want."
+        ),
+      render: coerceBool().optional().describe("Render the affected frames afterwards (default true)"),
+    },
+    async ({ path, pivots, render }) => {
+      const params: Record<string, unknown> = { path };
+      if (pivots !== undefined) params.pivots = pivots;
+      if (render !== undefined) params.render = render;
+      const result = await sendCommand("import_skeleton_animation", params);
+      if (!result.success) return text(`❌ ${result.error}`);
+      const d = result.data ?? {};
+      const lines = [
+        `✅ Applied ${(d.applied_frames ?? []).length} frame(s) to ${(d.bones_applied ?? []).length} bone(s): ${(d.bones_applied ?? []).join(", ")}`,
+        `Pivots copied: ${d.pivots_copied ? "yes" : "no (each bone kept its own)"}`,
+      ];
+      if (d.bones_in_file_not_in_rig?.length) {
+        lines.push(`⚠️ In the file but not in this rig, skipped: ${d.bones_in_file_not_in_rig.join(", ")}`);
+      }
+      if (d.bones_in_rig_not_in_file?.length) {
+        lines.push(`ℹ️ In this rig but not in the file, left unchanged: ${d.bones_in_rig_not_in_file.join(", ")}`);
+      }
+      if (d.skipped_frames?.length) {
+        lines.push(`⚠️ Frames beyond this project's length, skipped: ${d.skipped_frames.join(", ")}`);
+      }
+      if (d.pose_layer_was_hidden) {
+        lines.push("ℹ️ Project is in draw mode — call set_skeletor_mode with 'pose' to see the result.");
+      }
+      return text(lines.join("\n"));
+    }
+  );
+
+  server.tool(
     "set_skeletor_mode",
     "Switch between Skeletor's draw view (source artwork visible, posed result hidden) and pose view (posed result visible, source artwork hidden). Skeletor normally does this when you click the pose layer in the UI, which never happens over MCP — so switch to 'pose' before exporting or screenshotting, or the export shows the unposed artwork on top of the posed result.",
     {

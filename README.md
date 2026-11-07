@@ -313,6 +313,7 @@ Pixelorama-Skeletor-MCP exposes over 75 tools organized by domain:
 - `apply_bone_pose`: Rotate, translate or re-pivot bones on one frame and render the posed result.
 - `generate_skeletor_tween`: Interpolate poses between two keyframes using any Godot easing curve.
 - `set_skeletor_mode`: Switch between the draw view (source artwork) and the pose view (posed result).
+- `export_skeleton_animation` / `import_skeleton_animation`: Save a rig's whole animation to a `.skeletor` file and reapply it to another character, matching bones by name.
 
 See the full [Tool Reference](docs/tool-reference.md) for argument tables and JSON examples.
 
@@ -391,6 +392,35 @@ set_skeletor_mode { "mode": "pose" }
 canvas coordinates — put each one on the joint the bone turns around (a shoulder, an elbow), not on
 the centre of the sprite. Pass `"quick_set_pivot": true` to `apply_bone_pose` to centre any pivot you
 have not set on that bone's own artwork, which is Skeletor's "quick set bones".
+
+### Reusing an animation on another character
+
+`export_skeleton_animation` writes every frame's bone poses to a `.skeletor` file;
+`import_skeleton_animation` applies one to the current project's rig, **matching bones by name**:
+
+```jsonc
+export_skeleton_animation { "path": "/tmp/armswing.skeletor" }
+// -> 8 frames, bones Torso + Arm_R, 3858 bytes
+
+// ...open a different character with a Torso and an Arm_R...
+import_skeleton_animation { "path": "/tmp/armswing.skeletor" }
+```
+
+Bones the target rig does not have are skipped, bones it has that the file does not are left
+alone, and the target always keeps **its own hierarchy** — so a character with the same bone
+names but different parenting or proportions still receives the motion. Both are reported back,
+so nothing is skipped silently.
+
+By default pivots are **not** copied. `gizmo_origin` is an absolute canvas coordinate, so copying
+it would move every joint to wherever the source character's joints were; leaving it off transfers
+the motion while each rig keeps its own joint positions. Pass `"pivots": true` when the two rigs
+genuinely share proportions and canvas size.
+
+> Skeletor defines this `.skeletor` format itself, and ships an exporter plus a **Project → Load
+> Skeleton** menu item — but both are broken in v0.17–v0.19 (its `Main.gd` calls manager methods
+> that were removed in a 2025-11-24 refactor; the export writes a 0-byte file and reports success,
+> and the import segfaults Pixelorama). These tools read and write the same format, so files stay
+> interchangeable if upstream fixes theirs.
 
 Architecture, Skeletor's data model and the full reverse-engineering notes are in
 [Skeletor Integration](docs/skeletor-integration.md).
@@ -626,6 +656,24 @@ A failsafe in `generate_pose()` checks whether the **current** frame's in-memory
 and, if so, renders an empty image to the current frame and returns — even when asked for a
 different frame. One skeleton-less current frame therefore suppresses every render and blanks that
 frame. The bridge populates the in-memory set before rendering anything.
+
+#### `import_skeleton_animation` says a bone was skipped
+Bones are matched by **name**. A bone present in the file but not in the target rig is skipped and
+listed under "In the file but not in this rig"; one present in the rig but not the file is left
+unchanged. Rename the group layers to match if you meant them to correspond.
+
+#### An imported animation moved every joint to the wrong place
+You passed `"pivots": true` between rigs that do not share proportions or canvas size.
+`gizmo_origin` is an absolute canvas coordinate, so copying it relocates each joint to the source
+character's position. Re-import with pivots off (the default).
+
+#### Skeletor's own Export → `.skeletor` writes a 0-byte file, or Load Skeleton crashes
+Not something this bridge can fix — it is an upstream bug in Skeletor v0.17–v0.19. Its `Main.gd`
+calls `skeleton_manager.load_frame_info()` and `.current_frame_data`, both removed when the manager
+was refactored in `b0fe3b8` (2025-11-24). The failed call returns `null`,
+`ConfigFile.set_value(section, key, null)` erases the key, so the export writes nothing and still
+reports success; on import the same `null` is dereferenced and Pixelorama segfaults. Use
+`export_skeleton_animation` / `import_skeleton_animation` instead — same file format, working.
 
 #### A bone's rotation does not move its artwork
 A bone is a **group layer**; only artwork on layers *inside* that group is transformed. If you drew
