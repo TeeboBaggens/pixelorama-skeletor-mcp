@@ -1,6 +1,6 @@
-# 🚀 Getting Started with Pixelorama-MCP
+# 🚀 Getting Started with Pixelorama-Skeletor-MCP
 
-Welcome to **Pixelorama-MCP**! This guide covers everything you need: installing the server, connecting an AI client, running drawing scripts manually, and importing existing images into Pixelorama.
+Welcome to **Pixelorama-Skeletor-MCP**! This guide covers everything you need: installing the server, connecting an AI client, running drawing scripts manually, and importing existing images into Pixelorama.
 
 ---
 
@@ -15,8 +15,8 @@ Welcome to **Pixelorama-MCP**! This guide covers everything you need: installing
 ## Step 1 — Clone and Build the MCP Server
 
 ```bash
-git clone https://github.com/abidoo22/Pixelorama-MCP.git
-cd Pixelorama-MCP/mcp-server
+git clone https://github.com/TeeboBaggens/pixelorama-skeletor-mcp.git
+cd pixelorama-skeletor-mcp/mcp-server
 npm install
 npm run build
 ```
@@ -65,7 +65,7 @@ Edit your config file:
   "mcpServers": {
     "pixelorama": {
       "command": "node",
-      "args": ["/absolute/path/to/Pixelorama-MCP/mcp-server/dist/index.js"]
+      "args": ["/absolute/path/to/pixelorama-skeletor-mcp/mcp-server/dist/index.js"]
     }
   }
 }
@@ -79,7 +79,7 @@ Restart Claude Desktop. You should see pixelorama appear in the tools list.
 2. Click **+ Add New MCP Server**
 3. Set **Name** to `pixelorama`, **Type** to `command`, **Command** to:
    ```
-   node /absolute/path/to/Pixelorama-MCP/mcp-server/dist/index.js
+   node /absolute/path/to/pixelorama-skeletor-mcp/mcp-server/dist/index.js
    ```
 4. Save and verify the status turns green
 

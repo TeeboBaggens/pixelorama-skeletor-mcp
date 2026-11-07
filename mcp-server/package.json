@@ -1,11 +1,11 @@
 {
-  "name": "pix-mcp",
+  "name": "pixelorama-skeletor-mcp",
   "version": "0.2.1",
-  "description": "MCP server that bridges AI assistants with Pixelorama for pixel art creation",
+  "description": "MCP server that bridges AI assistants with Pixelorama for pixel art creation, including skeletal rigging and animation via the Skeletor extension",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "pix-mcp": "dist/index.js"
+    "pixelorama-skeletor-mcp": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",
@@ -21,13 +21,17 @@
     "pixel-art",
     "ai",
     "drawing",
-    "model-context-protocol"
+    "model-context-protocol",
+    "skeletor",
+    "skeletal-animation",
+    "rigging",
+    "godot"
   ],
   "author": "pix-MCP Contributors",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/abidoo22/Pixelorama-MCP.git"
+    "url": "git+https://github.com/TeeboBaggens/pixelorama-skeletor-mcp.git"
   },
   "engines": {
     "node": ">=22.13.0"
