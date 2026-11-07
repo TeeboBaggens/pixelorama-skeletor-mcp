@@ -657,6 +657,26 @@ and, if so, renders an empty image to the current frame and returns — even whe
 different frame. One skeleton-less current frame therefore suppresses every render and blanks that
 frame. The bridge populates the in-memory set before rendering anything.
 
+#### Building a large rig hangs Pixelorama
+Fixed in this fork; if you see it, the bridge build predates the fix.
+
+Skeletor re-catalogues its whole bone set on every layer change, and creating a bone group while
+nested pixel layers already exist costs roughly 20x more per bone. Measured while building a
+nested rig with sprite layers interleaved: `19, 11, 12, 47, 931, 32984 ms` for bones 1-6 — a
+13-bone rig never finished. The identical sequence with the Skeletor extension disabled runs at
+2-7 ms per bone throughout, so the cost is Skeletor's reaction, not Pixelorama's layer code.
+
+`setup_skeletor_rig` now builds **every bone group first and adds the sprite layers in a second
+pass**, which avoids it: a 13-bone, 28-layer rig builds in **0.06s**.
+
+#### A parent and child bone posed together both come out wrong
+`SkeletonBone`'s setters propagate their delta to every child unless `should_update_silently` is
+set, so writing absolute values for a parent and its child in one call makes the child accumulate
+its parent's rotation. Symptom: tweened frames overshoot their own keyframes — e.g. a forearm
+reading `-96°` between keyframes of `-28°` and `-58°`. `apply_bone_pose` and
+`generate_skeletor_tween` now apply changes through a single silent `deserialize()`. Skeletor
+composes the hierarchy at render time, so absolute per-bone writes are correct.
+
 #### `import_skeleton_animation` says a bone was skipped
 Bones are matched by **name**. A bone present in the file but not in the target rig is skipped and
 listed under "In the file but not in this rig"; one present in the rig but not the file is left

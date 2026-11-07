@@ -172,6 +172,48 @@ func assign_pose_layer(project, layer) -> bool:
 
 
 # ─────────────────────────────────────────────
+# BULK LAYER EDITING
+# ─────────────────────────────────────────────
+
+## Suspends Skeletor's reaction to layer changes for the duration of bulk layer work.
+##
+## Skeletor re-catalogues its whole bone set on every layer change, and with NESTED bone groups
+## that cost grows explosively. Measured per bone while building a nested rig:
+##
+##     bone 1   17 ms      bone 4     49 ms
+##     bone 2    9 ms      bone 5    928 ms
+##     bone 3   11 ms      bone 6  32740 ms
+##
+## A 13-bone rig never finishes: it exceeds the bridge's 60s main-thread cap and leaves
+## Pixelorama wedged. The same nested creation with the Skeletor extension disabled runs at
+## 1-2 ms per bone, so the cost is entirely Skeletor's reaction, not Pixelorama's layer code.
+## Disconnecting its project signals for the duration removes it: 1-2 ms per bone with the
+## extension still installed and working.
+##
+## Returns whether signals were actually suspended; pass that to end_bulk_layer_edit().
+func begin_bulk_layer_edit() -> bool:
+	var mgr = manager()
+	if mgr == null or not mgr.has_method("manage_project_signals"):
+		return false
+	mgr.manage_project_signals(false)
+	return true
+
+
+## Restores what begin_bulk_layer_edit() suspended.
+##
+## Upstream's connect branch is a coroutine -- it awaits two frames before restoring the UI
+## signals -- so this call returns before it has fully finished. The per-layer reconnections it
+## performs are synchronous, which is what matters here, and callers catalogue() afterwards.
+func end_bulk_layer_edit(was_suspended: bool) -> void:
+	if not was_suspended:
+		return
+	var mgr = manager()
+	if mgr == null:
+		return
+	mgr.manage_project_signals(true)
+
+
+# ─────────────────────────────────────────────
 # BONES
 # ─────────────────────────────────────────────
 
