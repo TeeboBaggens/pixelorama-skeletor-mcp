@@ -199,15 +199,16 @@ async function runTests() {
 
   // 10. Test A2: eval_gdscript runtime scripting
   console.log('\n--- Testing A2: eval_gdscript runtime scripting ---');
+  // Write through the injected `image`, which the bridge has already normalised to canvas size.
+  // Reaching past it for `cel.get_image()` yields the RAW sparse cel -- only as big as its used
+  // content and positioned by cel.offset -- so canvas-coordinate writes land outside and clip.
   const evalScript = `
-var cel = project.frames[0].cels[0]
-var img = cel.get_image()
 for x in range(10):
-    img.set_pixel(x, 50, Color.DEEP_PINK)
-return {"status": "ok", "pixels_written": 10, "format": img.get_format()}
+    image.set_pixel(x, 50, Color.DEEP_PINK)
+return {"status": "ok", "pixels_written": 10, "format": image.get_format()}
 `;
   const tEval0 = Date.now();
-  const evalRes = await callTool('eval_gdscript', { code: evalScript });
+  const evalRes = await callTool('eval_gdscript', { layer: 0, code: evalScript });
   const dtEval = Date.now() - tEval0;
   assert(evalRes.success === true, `eval_gdscript executed in ${dtEval} ms`);
   assert(evalRes.data?.result?.pixels_written === 10, `eval_gdscript returned result: ${JSON.stringify(evalRes.data?.result)}`);

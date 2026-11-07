@@ -375,28 +375,35 @@ export function registerCanvasTools(server: McpServer): void {
 
   server.tool(
     "set_symmetry_guide",
-    "Enable and position Pixelorama's native horizontal and vertical symmetry guide axes for mirrored drawing.",
+    "Enable and position Pixelorama's symmetry (mirror) guides for mirrored drawing. Horizontal symmetry mirrors left<->right and is shown as a VERTICAL line; vertical symmetry mirrors top<->bottom and is shown as a HORIZONTAL line. The two guides are coloured differently (green and orange by default) so they are never confusable on screen.",
     {
-      horizontal: z.boolean().default(false).describe("Enable horizontal symmetry plane"),
-      vertical: z.boolean().default(false).describe("Enable vertical symmetry plane"),
-      x_pos: coerceInt(0).optional().describe("X coordinate for vertical symmetry line (defaults to center)"),
-      y_pos: coerceInt(0).optional().describe("Y coordinate for horizontal symmetry line (defaults to center)"),
+      horizontal: z.boolean().default(false).describe("Mirror left<->right. Drawn as a vertical line at x_pos."),
+      vertical: z.boolean().default(false).describe("Mirror top<->bottom. Drawn as a horizontal line at y_pos."),
+      x_pos: coerceInt(0).optional().describe("X coordinate of the vertical line used by horizontal symmetry (defaults to centre)"),
+      y_pos: coerceInt(0).optional().describe("Y coordinate of the horizontal line used by vertical symmetry (defaults to centre)"),
+      horizontal_color: z.string().optional().describe("Colour of the horizontal-symmetry guide, the vertical line (default '#2ecc40', green)"),
+      vertical_color: z.string().optional().describe("Colour of the vertical-symmetry guide, the horizontal line (default '#ff851b', orange)"),
     },
-    async ({ horizontal, vertical, x_pos, y_pos }) => {
-      const params: Record<string, unknown> = { horizontal, vertical };
-      if (x_pos !== undefined) params.x_pos = x_pos;
-      if (y_pos !== undefined) params.y_pos = y_pos;
-      const result = await sendCommand("set_symmetry_guide", params);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: result.success
-              ? `✅ Symmetry Guides updated: Horizontal=${horizontal}, Vertical=${vertical} (Center: x=${result.data?.x_symmetry}, y=${result.data?.y_symmetry})`
-              : `❌ ${result.error}`,
-          },
-        ],
+    async (args) => {
+      const params: Record<string, unknown> = {
+        horizontal: args.horizontal,
+        vertical: args.vertical,
       };
+      for (const key of ["x_pos", "y_pos", "horizontal_color", "vertical_color"] as const) {
+        if (args[key] !== undefined) params[key] = args[key];
+      }
+      const result = await sendCommand("set_symmetry_guide", params);
+      if (!result.success) {
+        return { content: [{ type: "text" as const, text: `❌ ${result.error}` }] };
+      }
+      const d = result.data ?? {};
+      const lines = [
+        "✅ Symmetry guides updated",
+        `  horizontal: ${d.horizontal?.enabled ? "on " : "off"}  ${d.horizontal?.mirrors}  —  ${d.horizontal?.guide}, ${d.horizontal?.color}`,
+        `  vertical:   ${d.vertical?.enabled ? "on " : "off"}  ${d.vertical?.mirrors}  —  ${d.vertical?.guide}, ${d.vertical?.color}`,
+      ];
+      if (d.warning) lines.push(`⚠️ ${d.warning}`);
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     }
   );
 

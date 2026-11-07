@@ -12,8 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # Node 18 and 20 are EOL and below eslint 10's floor (^20.19 || ^22.13 || >=24).
-        # 26 is the active LTS, 24 and 22 are still in maintenance. Checked 2026-11-07.
+        # Node 18 and 20 are EOL. 26 is the active LTS, 24 and 22 are maintenance LTS.
+        # 22.13 is also eslint 10's floor on that line. Checked 2026-11-07.
         node-version: [22, 24, 26]
 
     steps:

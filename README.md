@@ -10,7 +10,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/abidoo22/Pixelorama-MCP?style=flat&logo=github)](https://github.com/abidoo22/Pixelorama-MCP/stargazers)
 [![MCP Server](https://img.shields.io/badge/MCP-Model%20Context%20Protocol-blueviolet)](https://modelcontextprotocol.io/)
 [![Pixelorama](https://img.shields.io/badge/Pixelorama-v1.1.10%20%7C%20v1.2%2B-orange)](https://www.pixelorama.org/)
-[![Node.js](https://img.shields.io/badge/node-%E2%89%A520.19-brightgreen)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/node-%E2%89%A522.13-brightgreen)](https://nodejs.org/)
 [![Tools](https://img.shields.io/badge/MCP%20tools-75%2B%20(111%20total)-blue)](docs/tool-reference.md)
 [![Skeletor](https://img.shields.io/badge/Skeletor-skeletal%20animation-9cf)](docs/skeletor-integration.md)
 
@@ -123,7 +123,7 @@ Setting up takes under 5 minutes.
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) (v22 or newer — the dev toolchain needs `^20.19 || ^22.13 || >=24`)
+- [Node.js](https://nodejs.org/) **v22.13 or newer** — Node 18 and 20 are end-of-life
 - [Pixelorama](https://www.pixelorama.org/) (**v1.1.10** or **v1.2+**)
 - Optional: [Skeletor](https://github.com/Variable-Interactive/Skeletor) for skeletal animation — see [Skeletal Animation with Skeletor](#-skeletal-animation-with-skeletor)
 - An MCP Client: [Claude Desktop](https://claude.ai/download), [Cursor](https://cursor.com/), [Antigravity](https://github.com/), or any MCP-compatible environment
@@ -401,7 +401,62 @@ Architecture, Skeletor's data model and the full reverse-engineering notes are i
 - Fully restart your AI client after editing configuration.
 
 #### `npm install` fails with `ERESOLVE` on eslint
-- Node 18 and 20 are below eslint 10's floor (`^20.19 || ^22.13 || >=24`). Use Node 22 or newer.
+- You are on Node 18 or 20. Both are end-of-life and below eslint 10's floor
+  (`^20.19 || ^22.13 || >=24`). Use Node 22.13 or newer.
+
+#### Do not run `npm audit fix --force` here
+It will silently **downgrade the toolchain**, because npm treats a major downgrade as a valid
+"fix": eslint 10 → 9 (which npm itself then reports as no longer supported), and typescript-eslint
+8 → 7. It rewrites `package.json` while doing it, and can leave the tree in a state where plain
+`npm audit fix` then refuses to run at all with `ERESOLVE`.
+
+Every finding in this project's audit traces to a single transitive package, `minimatch`, pulled in
+by eslint and typescript-eslint. It is pinned instead:
+
+```json
+"overrides": { "minimatch": "^11.0.5" }
+```
+
+`<= 11.0.0` carries a glob-amplification DoS advisory (GHSA-g3hv-75wg-m249); `11.0.5` is outside
+that range. That takes the audit to **0 vulnerabilities** with the toolchain untouched. If a future
+audit flags something, prefer an `overrides` pin on the offending transitive package over
+`--force`. Note these are all **dev-only** dependencies — they lint and compile this repo's own
+source and ship in nothing at runtime.
+
+To recover if `--force` has already run:
+
+```bash
+git checkout -- mcp-server/package.json mcp-server/package-lock.json
+cd mcp-server && rm -rf node_modules && npm ci
+npx tsc --version      # expect 7.x
+npm ls --depth=0       # expect eslint 10.x, typescript-eslint 8.x
+```
+
+#### Why are there two TypeScript packages?
+TypeScript 7.0 is the new native compiler and **ships no compiler API** — its main export is just
+`version.cjs`, with the API behind explicitly `unstable/*` subpaths. `typescript-eslint` imports
+that API, so it cannot run against TS 7 at all and fails fast with
+`typescript-eslint does not support TS 7.0` ([typescript-eslint#10940] tracks support).
+
+This project therefore uses Microsoft's documented side-by-side arrangement from the
+[TypeScript 7.0 announcement]:
+
+```json
+"@typescript/native": "npm:typescript@^7.0.2",
+"typescript": "npm:@typescript/typescript6@^6.0.2"
+```
+
+The first alias supplies TypeScript 7's `tsc`, so `typecheck` and `build` run on 7. The
+`typescript` specifier resolves to `@typescript/typescript6`, which re-exports the 6.0 API, so
+`typescript-eslint` keeps working. **Both are stable releases — no prerelease is involved**, and
+`npm install` resolves without `--legacy-peer-deps`.
+
+Check what you have with `npx tsc --version` (expect 7.x) and `npm ls typescript` (expect
+`@typescript/typescript6`). Once typescript-eslint supports TS 7, both entries collapse back to a
+plain `"typescript"`.
+
+[typescript-eslint#10940]: https://github.com/typescript-eslint/typescript-eslint/issues/10940
+[TypeScript 7.0 announcement]: https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-6.0
 
 #### Pixelorama is open, but commands time out
 - Verify that `PixMcpBridge.pck` is enabled under **Edit → Preferences → Extensions**.
@@ -449,6 +504,19 @@ Same sparse-cel root cause, on the read side: the frame compositor blitted every
 `Vector2i.ZERO` instead of at `cel.offset`, so each layer's content landed at the canvas origin
 rather than where it was drawn. Fixed in this fork.
 
+#### An `eval_gdscript` script reports `N pixels clipped` and writes nothing
+The script reached past the image it was given. `eval_gdscript` injects an `image` that the bridge
+has already normalised to canvas size, but a script that fetches its own cel —
+
+```gdscript
+var img = project.frames[0].cels[0].get_image()   # RAW sparse cel
+img.set_pixel(x, y, color)                        # canvas coords land outside it
+```
+
+— gets the **raw sparse cel**: only as large as its used content, positioned by `cel.offset`. Writes
+in canvas coordinates then fall outside it and are clipped. Use the injected `image`, or
+`api.get_layer_image(layer)` which returns a canvas-sized copy.
+
 #### A layer command returns an empty `{}` for a layer that was clearly created
 `ProjectAPI.current_layer` is read-only. `add_layer` and `create_layer_group` both assigned to it,
 which raised `Invalid assignment of property or key 'current_layer' ... on a base object of type
@@ -467,20 +535,32 @@ as its only setter, so `_api.project.current_frame = ...` raised and aborted the
 frame had already been removed. Fixed in this fork.
 
 #### `set_tile_mode` or `set_symmetry_guide` fails with no message
-Both were written against Pixelorama 1.1's `Project` API:
+Both were written against Pixelorama 1.1's `Project` API and are fixed in this fork:
 - **`set_tile_mode`** used `project.tile_mode`, which moved to `project.tiles.mode` in 1.2
-  (`Tiles.MODE` = `NONE, BOTH, X_AXIS, Y_AXIS`). Fixed in this fork.
+  (`Tiles.MODE` = `NONE, BOTH, X_AXIS, Y_AXIS`).
 - **`set_symmetry_guide`** used `project.show_x_symmetry` / `show_y_symmetry`, which no longer
-  exist: guide visibility moved onto the `SymmetryGuide` nodes (`project.x_symmetry_axis.visible`,
-  gated by `Global.show_x_symmetry_axis and Global.show_guides`) and the mirroring itself onto
-  `Tools.horizontal_mirror` / `vertical_mirror`. **Still only partly working** — it sets the
-  symmetry points and returns a `warning`, but does not toggle the guides. Migrating it needs a
-  decision on which axis "horizontal" names, since upstream's *horizontal* mirror drives the *y*
-  axis guide.
+  exist. See below for what the axes actually mean.
+
+#### Which symmetry axis is which?
+The naming crosses over, which is why this was wrong for so long. An **axis** is named for the
+coordinate it mirrors *about*; a **guide** is named for the line's orientation:
+
+| You ask for | It mirrors | Line you see | Internals | Default colour |
+|---|---|---|---|---|
+| `horizontal` | left ↔ right (flips X) | **vertical** line at `x_pos` | `y_symmetry_axis`, `Global.show_y_symmetry_axis`, `Tools.horizontal_mirror`, `x_symmetry_point` | green `#2ecc40` |
+| `vertical` | top ↔ bottom (flips Y) | **horizontal** line at `y_pos` | `x_symmetry_axis`, `Global.show_x_symmetry_axis`, `Tools.vertical_mirror`, `y_symmetry_point` | orange `#ff851b` |
+
+The two guides get distinct colours by default so they can't be confused on screen. Note the
+symmetry *points* are in doubled coordinates (`mirror = symmetry_point - pos`), so a line at canvas
+position P stores `2P - 1` — matching Pixelorama's own default of `size - 1` for a centred line.
+
+Mirroring applies to **hand-drawing in the app**. The MCP drawing tools write to cel images
+directly and are not mirrored.
 
 #### `switch_palette` reports `Palette 'Default' not found`
-There is no palette named "Default". Call `list_palettes` for the installed names — a stock
-install ships "Pixelorama" and "DawnBringer 32".
+There is no palette named "Default" — the tool is working, the name is wrong. Call `list_palettes`
+for the installed names; a stock install ships "Pixelorama" and "DawnBringer 32". Create your own
+with `create_palette` first if you need a known one.
 
 #### A duplicated frame lost its extension data
 `duplicate_frame` copied cel images but neither the sparse-cel `offset` nor cel **metadata**.
@@ -538,6 +618,13 @@ inside each bone for exactly this reason — check `sprite_layer_index` in its r
 ---
 
 ### General
+
+#### The macOS menu bar says "godot", not "Pixelorama"
+Expected when running Pixelorama from source (`godot --path .../pixelorama`, which the dev scripts
+here do): macOS names the menu bar after the running bundle, which is `Godot.app`. The app itself is
+Pixelorama and the bridge is unaffected. To see "Pixelorama" there, run an exported `Pixelorama.app`
+and install `PixMcpBridge.pck` into its extensions folder instead — that is also how an end user
+would run it.
 
 #### Which AI models produce the best art?
 - Models with strong spatial reasoning and mathematical capability (such as Claude 3.5 Sonnet, Claude 3.7 Sonnet, GPT-4o, and Gemini 1.5 Pro) produce remarkable shading, dithering, and composition.
