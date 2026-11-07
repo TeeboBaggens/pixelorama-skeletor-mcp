@@ -657,6 +657,83 @@ and, if so, renders an empty image to the current frame and returns — even whe
 different frame. One skeleton-less current frame therefore suppresses every render and blanks that
 frame. The bridge populates the in-memory set before rendering anything.
 
+#### A command timed out and now Pixelorama is unresponsive
+A timed-out command is **not cancelled**. GDScript cannot preempt a running function, so when the
+bridge stops waiting it only gives up on the *reply* — the command keeps running on Pixelorama's
+main thread, and the window stays frozen until it finishes on its own.
+
+The bridge does three things about this:
+
+- The 504 says so explicitly, rather than implying the work stopped.
+- Further commands are refused with **503** (`"busy": true`, plus `running_tool` and
+  `running_for_ms`) instead of being queued. Queueing is what turns one slow command into a
+  compounding freeze: a client that retries on timeout stacks another job behind the one already
+  running. Nothing is lost — the bridge frees itself as soon as the main thread is done.
+- The long loops the bridge owns (rig building, sprite placement, tweening) poll the caller's
+  deadline and stop at the next safe point. Unbounded, a 400-bone chain pins the main thread for
+  ~110s; with a budget it stops in ~3s. Work already done is left in place, so undo it or start
+  from a fresh canvas.
+
+Set a per-request budget with a top-level `"timeout_ms"` next to `"tool"` and `"params"`
+(clamped to 1s–10min; default 60s):
+
+```json
+{ "tool": "setup_skeletor_rig", "params": { "bones": [] }, "timeout_ms": 120000 }
+```
+
+Commands with no loop to poll — a single huge image operation — still cannot be interrupted. The
+only guarantee there is that the bridge will not make the freeze worse.
+
+#### Building a large rig hangs Pixelorama
+Fixed in this fork; if you see it, the bridge build predates the fix.
+
+Skeletor re-catalogues its whole bone set on every layer change, and creating a bone group while
+nested pixel layers already exist costs roughly 20x more per bone. Measured while building a
+nested rig with sprite layers interleaved: `19, 11, 12, 47, 931, 32984 ms` for bones 1-6 — a
+13-bone rig never finished. The identical sequence with the Skeletor extension disabled runs at
+2-7 ms per bone throughout, so the cost is Skeletor's reaction, not Pixelorama's layer code.
+
+`setup_skeletor_rig` now builds **every bone group first and adds the sprite layers in a second
+pass**, which avoids it: a 13-bone, 28-layer rig builds in **0.06s**.
+
+#### A bone's own sprite covers the limbs attached to it
+Pixelorama's `add_layer` puts a new child at the **top** of an expanded group's children
+(`new_layer_idx = project.current_layer`; a group's children sit at lower indices than the group
+itself). Because the two-pass build above adds the sprite layers after the whole hierarchy exists,
+every bone's sprite would land in front of its child bones — the torso drawn over the arms hanging
+off it.
+
+`setup_skeletor_rig` adds a third pass that sinks each sprite to the bottom of its own group with
+`project.move_layers()`, so a child bone draws in front of the parent it hangs from. Pass
+`sprite_above_children: true` for the opposite. Depth that varies per bone — the far arm behind
+the torso, the near arm in front — is art direction the rig cannot infer; reorder those layers by
+hand.
+
+#### A parent and child bone posed together both come out wrong
+`SkeletonBone`'s setters propagate their delta to every child, so writing absolute values for a
+parent and its child in one call makes the child accumulate its parent's rotation *if the child is
+written first*. Symptom: tweened frames overshoot their own keyframes — e.g. a forearm reading
+`-96°` between keyframes of `-28°` and `-58°`.
+
+`apply_bone_pose` and `generate_skeletor_tween` now sort their writes **parents-first**, so each
+child's own absolute value lands last and wins.
+
+> **Do not fix this by suppressing propagation.** `deserialize(data, true)` sets
+> `should_update_silently`, which makes the setter pass `should_propagate = false` —
+> and that propagation *is* the kinematic chain. Alongside adding the rotation to each child,
+> `update_bone_property` orbits every child's `start_point` around its parent:
+>
+> ```gdscript
+> if _bone_set.has(bone_name) and property == "bone_rotation":
+>     var displacement := rel_to_start_point(child_bone.rel_to_canvas(child_bone.start_point))
+>     displacement = displacement.rotated(diff)
+>     child_bone.start_point = child_bone.rel_to_origin(rel_to_canvas(start_point) + displacement)
+> ```
+>
+> Silence it and every child's pivot stays put while its parent swings away — forearms detach
+> from elbows, feet from ankles. Skeletor bakes the hierarchy into `start_point` at write time; it
+> does **not** compose it at render time. Ordering is the fix, not silence.
+
 #### `import_skeleton_animation` says a bone was skipped
 Bones are matched by **name**. A bone present in the file but not in the target rig is skipped and
 listed under "In the file but not in this rig"; one present in the rig but not the file is left

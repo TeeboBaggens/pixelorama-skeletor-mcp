@@ -126,10 +126,19 @@ export function registerSkeletorTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Name of the pose layer (default 'Pose Layer'). Must contain 'Pose Layer' — Skeletor identifies it by name."),
+      sprite_above_children: coerceBool()
+        .optional()
+        .describe(
+          "Draw each bone's own sprite in front of its child bones instead of behind them " +
+            "(default false, so limbs draw in front of the body they hang from)."
+        ),
     },
-    async ({ bones, pose_layer_name }) => {
+    async ({ bones, pose_layer_name, sprite_above_children }) => {
       const params: Record<string, unknown> = { bones };
       if (pose_layer_name) params.pose_layer_name = pose_layer_name;
+      if (sprite_above_children !== undefined) {
+        params.sprite_above_children = sprite_above_children;
+      }
       const result = await sendCommand("setup_skeletor_rig", params);
       if (!result.success) return text(`❌ ${result.error}`);
       const d = result.data ?? {};

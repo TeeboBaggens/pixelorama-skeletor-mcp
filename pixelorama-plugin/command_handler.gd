@@ -156,6 +156,37 @@ func get_available_tools() -> Array:
 	return tools
 
 
+## Wall-clock point past which the HTTP caller has given up on the running command.
+var _deadline_msec: int = 0
+
+
+func begin_request(deadline_msec: int) -> void:
+	_deadline_msec = deadline_msec
+
+
+func end_request() -> void:
+	_deadline_msec = 0
+
+
+## True once the caller has stopped waiting. GDScript cannot preempt a running function, so the
+## only way to stop long work is for the loops that own it to poll this and return at a safe
+## point. Every caller MUST leave the project in a consistent state before bailing out.
+func past_deadline() -> bool:
+	return _deadline_msec > 0 and Time.get_ticks_msec() > _deadline_msec
+
+
+func _abandoned(what: String, done: int, total: int) -> Dictionary:
+	push_warning(LOG_TAG + "Abandoned %s after %d of %d" % [what, done, total])
+	return {
+		"success": false,
+		"abandoned": true,
+		"error": (
+			"Stopped after %d of %d %s because the caller had already timed out. " % [done, total, what]
+			+ "The partial result was left in place -- undo it or start from a fresh canvas."
+		)
+	}
+
+
 func execute(tool_name: String, params: Dictionary) -> Dictionary:
 	if not _tool_registry.has(tool_name):
 		return {"success": false, "error": "Unknown tool: %s" % tool_name}
@@ -5952,6 +5983,41 @@ func _skeletor_context() -> Dictionary:
 	return {"project": project}
 
 
+## Depth of a bone in the skeleton, counting only ancestors present in `bones`.
+## Used to order writes parents-first; the loop is bounded so a malformed parent cycle
+## cannot hang the main thread.
+func _skeletor_bone_depth(bones: Dictionary, bone_name: String) -> int:
+	var depth := 0
+	var cursor := bone_name
+	var guard := 0
+	while guard < bones.size():
+		var bone = bones.get(cursor, null)
+		if bone == null:
+			break
+		var parent_name := str(bone.parent_bone_name)
+		if parent_name.is_empty() or not bones.has(parent_name):
+			break
+		depth += 1
+		cursor = parent_name
+		guard += 1
+	return depth
+
+
+## Sorts `names` so that a parent is always written before its children, keeping the caller's
+## original order among bones at the same depth.
+func _skeletor_parent_first(bones: Dictionary, names: Array) -> Array:
+	var decorated := []
+	for i in names.size():
+		decorated.append([_skeletor_bone_depth(bones, str(names[i])), i, names[i]])
+	decorated.sort_custom(
+		func(a, b): return a[0] < b[0] if a[0] != b[0] else a[1] < b[1]
+	)
+	var ordered := []
+	for row in decorated:
+		ordered.append(row[2])
+	return ordered
+
+
 func _skeletor_parse_vec2(value, fallback: Vector2) -> Vector2:
 	if value is Dictionary:
 		return Vector2(float(value.get("x", fallback.x)), float(value.get("y", fallback.y)))
@@ -6136,12 +6202,21 @@ func _cmd_setup_skeletor_rig(params: Dictionary) -> Dictionary:
 				unresolved.append("%s (parent '%s')" % [str(spec.get("name")), str(spec.get("parent", ""))])
 			return {"success": false, "error": "Unresolvable bone parents (missing parent, or a cycle): %s" % str(unresolved)}
 
+	# Skeletor re-catalogues on every layer change, which is exponential in nested bone count
+	# (see skeletor_adapter.begin_bulk_layer_edit). Suspend it while the layers are built.
+	var signals_suspended: bool = _skeletor.begin_bulk_layer_edit()
 	var created_bones := []
 	for spec in ordered:
+		# Building a bone group is the step that can blow the budget on a deep rig, so this is
+		# where a caller that has already given up gets honoured.
+		if past_deadline():
+			_skeletor.end_bulk_layer_edit(signals_suspended)
+			return _abandoned("bone groups", created_bones.size(), ordered.size())
 		var bone_name: String = str(spec.get("name"))
 		var parent_name: String = str(spec.get("parent", ""))
 
 		if _skeletor_layer_index_by_name(project, bone_name) >= 0:
+			_skeletor.end_bulk_layer_edit(signals_suspended)
 			return {"success": false, "error": "A layer named '%s' already exists -- bone names must be unique layer names" % bone_name}
 
 		var anchor_idx: int
@@ -6152,11 +6227,13 @@ func _cmd_setup_skeletor_rig(params: Dictionary) -> Dictionary:
 		else:
 			anchor_idx = _skeletor_layer_index_by_name(project, parent_name)
 			if anchor_idx < 0:
+				_skeletor.end_bulk_layer_edit(signals_suspended)
 				return {"success": false, "error": "Parent bone '%s' not found" % parent_name}
 			nest = true
 
 		var added := _skeletor_add_layer(project, anchor_idx, nest, bone_name, _api.tools.LayerTypes.GROUP)
 		if added.has("error"):
+			_skeletor.end_bulk_layer_edit(signals_suspended)
 			return {"success": false, "error": added["error"]}
 		var bone_layer = added["layer"]
 
@@ -6164,6 +6241,7 @@ func _cmd_setup_skeletor_rig(params: Dictionary) -> Dictionary:
 		# surrounding layers, so a wrong anchor produces a silently malformed rig.
 		var actual_parent: String = str(bone_layer.parent.name) if bone_layer.parent != null else ""
 		if actual_parent != parent_name:
+			_skeletor.end_bulk_layer_edit(signals_suspended)
 			return {"success": false, "error": "Bone '%s' nested under '%s' instead of '%s'; rig is incomplete" % [bone_name, actual_parent, parent_name]}
 
 		# Only the layer_id handle is recorded here. Indices are resolved at the end, once every
@@ -6175,19 +6253,76 @@ func _cmd_setup_skeletor_rig(params: Dictionary) -> Dictionary:
 		}
 
 		if bool(spec.get("sprite_layer", true)):
-			var sprite_name: String = str(spec.get("sprite_layer_name", "%s_Sprite" % bone_name))
-			var sprite := _skeletor_add_layer(
-				project,
-				project.layers.find(bone_layer),
-				true,
-				sprite_name,
-				_api.tools.LayerTypes.PIXEL
-			)
-			if sprite.has("error"):
-				return {"success": false, "error": sprite["error"]}
-			entry["sprite_layer"] = sprite_name
-			entry["sprite_layer_id"] = _get_or_create_layer_id(sprite["layer"])
+			entry["sprite_layer"] = str(spec.get("sprite_layer_name", "%s_Sprite" % bone_name))
 		created_bones.append(entry)
+
+	# Second pass: the sprite layers, once the whole bone hierarchy exists.
+	#
+	# Interleaving them is what makes rig building explode. Creating a bone group while nested
+	# PIXEL layers already exist costs ~20x more per bone with Skeletor installed -- 19, 11, 12,
+	# 47, 931, 32984 ms for bones 1-6 -- while the same sequence with the extension disabled runs
+	# at 2-7 ms throughout. Building every group first and adding the sprites afterwards avoids it
+	# entirely: 43 ms for eight groups plus 15 ms for their eight sprites.
+	var sprites_made := 0
+	for entry in created_bones:
+		if not entry.has("sprite_layer"):
+			continue
+		if past_deadline():
+			_skeletor.end_bulk_layer_edit(signals_suspended)
+			return _abandoned("sprite layers", sprites_made, created_bones.size())
+		sprites_made += 1
+		var owner_idx := _skeletor_layer_index_by_name(project, str(entry["name"]))
+		if owner_idx < 0:
+			_skeletor.end_bulk_layer_edit(signals_suspended)
+			return {"success": false, "error": "Bone '%s' vanished before its sprite layer could be added" % str(entry["name"])}
+		var sprite := _skeletor_add_layer(
+			project, owner_idx, true, str(entry["sprite_layer"]), _api.tools.LayerTypes.PIXEL
+		)
+		if sprite.has("error"):
+			_skeletor.end_bulk_layer_edit(signals_suspended)
+			return {"success": false, "error": sprite["error"]}
+		entry["sprite_layer_id"] = _get_or_create_layer_id(sprite["layer"])
+
+	# Third pass: sink each bone's own sprite beneath its child bones.
+	#
+	# add_layer() puts a new child at the TOP of an expanded group's children (it sets
+	# new_layer_idx = current_layer, and a group's children sit at lower indices than the group
+	# itself). Because the sprites are added after the whole hierarchy exists, every bone's
+	# sprite lands above its child bones -- the torso drawn over the arms hanging off it. For a
+	# limbed rig the useful default is the opposite: a child bone draws in front of the parent it
+	# hangs from. Moving the sprite down to the bottom of its group's children gives that.
+	if not bool(params.get("sprite_above_children", false)):
+		var sunk := 0
+		for entry in created_bones:
+			if not entry.has("sprite_layer"):
+				continue
+			# Each move rescans the layer array, so this pass is quadratic in bone count and is
+			# the most likely place a big rig runs out of budget. Leaving the remaining sprites
+			# at the top of their group is cosmetic, so stopping here is safe.
+			if past_deadline():
+				break
+			sunk += 1
+			var group_idx := _skeletor_layer_index_by_name(project, str(entry["name"]))
+			var sprite_idx := _skeletor_layer_index_by_name(project, str(entry["sprite_layer"]))
+			if group_idx < 0 or sprite_idx < 0:
+				continue
+			var group_layer = project.layers[group_idx]
+			# Descendants all sit below the group, so the first one get_children() reports is the
+			# bottom of the stack. A bone with no child bones has nothing to sink past.
+			var descendants: Array = group_layer.get_children(true)
+			if descendants.size() < 2:
+				continue
+			var bottom_idx: int = descendants[0].index
+			if sprite_idx <= bottom_idx:
+				continue
+			project.move_layers(
+				PackedInt32Array([sprite_idx]),
+				PackedInt32Array([bottom_idx]),
+				[group_layer]
+			)
+		for i in range(project.layers.size()):
+			project.layers[i].index = i
+		project.order_layers()
 
 	# The pose layer goes on top, anchored on the topmost layer so it inherits no parent.
 	var pose_layer = _skeletor.pose_layer(project)
@@ -6201,9 +6336,14 @@ func _cmd_setup_skeletor_rig(params: Dictionary) -> Dictionary:
 			_api.tools.LayerTypes.PIXEL
 		)
 		if added_pose.has("error"):
+			_skeletor.end_bulk_layer_edit(signals_suspended)
 			return {"success": false, "error": added_pose["error"]}
 		pose_layer = added_pose["layer"]
 		pose_created = true
+
+	# All layers exist; let Skeletor observe the project again before any bone state is read.
+	_skeletor.end_bulk_layer_edit(signals_suspended)
+
 	if not _skeletor.assign_pose_layer(project, pose_layer):
 		return {"success": false, "error": "Could not assign '%s' as Skeletor's pose layer" % str(pose_layer.name)}
 
@@ -6282,31 +6422,53 @@ func _cmd_apply_bone_pose(params: Dictionary) -> Dictionary:
 		return {"success": false, "error": "Frame %d has no skeleton. Run setup_skeletor_rig first (bones are group layers)." % frame_idx}
 
 	var quick_set: bool = bool(params.get("quick_set_pivot", false))
-	var applied := []
+
+	# Validate up front, then pose parents before their children.
+	#
+	# SkeletonBone's setters propagate their delta down the hierarchy (update_bone_property):
+	# rotating a bone adds that rotation to each child *and* orbits the child's pivot around it.
+	# That propagation is the kinematic chain -- suppress it and a child's pivot stays put while
+	# its parent swings away, detaching the limb. So we let it run, which means a child posed
+	# before its parent would have the parent's delta added on top of its own absolute value
+	# afterwards. Writing parents first lets each child's absolute value land last and win.
+	var specs_by_name := {}
+	var spec_names := []
 	for spec in pose_specs:
 		if not spec is Dictionary:
 			return {"success": false, "error": "Each entry of 'bones' must be a dictionary"}
-		var bone_name: String = str(spec.get("name", ""))
-		if not bones.has(bone_name):
-			return {"success": false, "error": "Bone '%s' not found on frame %d. Known bones: %s" % [bone_name, frame_idx, str(bones.keys())]}
-		var bone = bones[bone_name]
+		var spec_name: String = str(spec.get("name", ""))
+		if not bones.has(spec_name):
+			return {"success": false, "error": "Bone '%s' not found on frame %d. Known bones: %s" % [spec_name, frame_idx, str(bones.keys())]}
+		specs_by_name[spec_name] = spec
+		spec_names.append(spec_name)
 
+	for bone_name in _skeletor_parent_first(bones, spec_names):
+		var spec: Dictionary = specs_by_name[bone_name]
+		var bone = bones[bone_name]
+		var changes := {}
 		if spec.has("pivot"):
-			bone.gizmo_origin = _skeletor_parse_vec2(spec.get("pivot"), bone.gizmo_origin)
+			changes["gizmo_origin"] = _skeletor_parse_vec2(spec.get("pivot"), bone.gizmo_origin)
 		elif quick_set:
 			var layer_idx := _skeletor_layer_index_by_name(project, bone_name)
 			var origin: Vector2i = _skeletor.best_origin(project, layer_idx)
 			if origin != Vector2i.ZERO:
-				bone.gizmo_origin = Vector2(origin)
+				changes["gizmo_origin"] = Vector2(origin)
 		if spec.has("rotation_deg"):
-			bone.bone_rotation = deg_to_rad(float(spec.get("rotation_deg")))
+			changes["bone_rotation"] = deg_to_rad(float(spec.get("rotation_deg")))
 		if spec.has("rotate_origin_deg"):
-			bone.gizmo_rotate_origin = deg_to_rad(float(spec.get("rotate_origin_deg")))
+			changes["gizmo_rotate_origin"] = deg_to_rad(float(spec.get("rotate_origin_deg")))
 		if spec.has("translate"):
-			bone.start_point = _skeletor_parse_vec2(spec.get("translate"), bone.start_point)
+			changes["start_point"] = _skeletor_parse_vec2(spec.get("translate"), bone.start_point)
 		if spec.has("transformation_algorithm"):
-			bone.transformation_algorithm = int(spec.get("transformation_algorithm"))
-		applied.append(_skeletor.describe_bone(bone))
+			changes["transformation_algorithm"] = int(spec.get("transformation_algorithm"))
+		if not changes.is_empty():
+			bone.deserialize(changes, false)
+
+	# Report after every write, in the caller's original order, so the response reflects the
+	# settled pose rather than each bone's value mid-chain.
+	var applied := []
+	for bone_name in spec_names:
+		applied.append(_skeletor.describe_bone(bones[bone_name]))
 
 	_skeletor.save_bones(project, bones, frame_idx)
 
@@ -6378,26 +6540,34 @@ func _cmd_generate_skeletor_tween(params: Dictionary) -> Dictionary:
 	var span := float(to_frame - from_frame)
 	var tweened_frames := []
 	for frame_idx in range(from_frame + 1, to_frame):
+		if past_deadline():
+			return _abandoned("tweened frames", tweened_frames.size(), int(span) - 1)
 		var frame_bones: Dictionary = _skeletor.bones_at(project, frame_idx)
 		if frame_bones.is_empty():
 			continue
-		for bone_name in bone_names:
+		for bone_name in _skeletor_parent_first(frame_bones, bone_names):
 			if not frame_bones.has(bone_name):
 				continue
 			var bone = frame_bones[bone_name]
+			# Parents before children, for the same reason as apply_bone_pose: propagation is
+			# what keeps a child attached to its parent, so we keep it and let each child's own
+			# interpolated value be written last.
+			var changes := {}
 			for field in _skeletor.tweenable_fields():
 				if not (start_data[bone_name].has(field) and end_data[bone_name].has(field)):
 					continue
 				var start_value = start_data[bone_name][field]
 				var delta = end_data[bone_name][field] - start_value
-				bone.set(field, Tween.interpolate_value(
+				changes[field] = Tween.interpolate_value(
 					start_value,
 					delta,
 					float(frame_idx - from_frame),
 					span,
 					transition,
 					easing
-				))
+				)
+			if not changes.is_empty():
+				bone.deserialize(changes, false)
 		_skeletor.save_bones(project, frame_bones, frame_idx)
 		tweened_frames.append(frame_idx)
 
