@@ -669,13 +669,43 @@ nested rig with sprite layers interleaved: `19, 11, 12, 47, 931, 32984 ms` for b
 `setup_skeletor_rig` now builds **every bone group first and adds the sprite layers in a second
 pass**, which avoids it: a 13-bone, 28-layer rig builds in **0.06s**.
 
+#### A bone's own sprite covers the limbs attached to it
+Pixelorama's `add_layer` puts a new child at the **top** of an expanded group's children
+(`new_layer_idx = project.current_layer`; a group's children sit at lower indices than the group
+itself). Because the two-pass build above adds the sprite layers after the whole hierarchy exists,
+every bone's sprite would land in front of its child bones — the torso drawn over the arms hanging
+off it.
+
+`setup_skeletor_rig` adds a third pass that sinks each sprite to the bottom of its own group with
+`project.move_layers()`, so a child bone draws in front of the parent it hangs from. Pass
+`sprite_above_children: true` for the opposite. Depth that varies per bone — the far arm behind
+the torso, the near arm in front — is art direction the rig cannot infer; reorder those layers by
+hand.
+
 #### A parent and child bone posed together both come out wrong
-`SkeletonBone`'s setters propagate their delta to every child unless `should_update_silently` is
-set, so writing absolute values for a parent and its child in one call makes the child accumulate
-its parent's rotation. Symptom: tweened frames overshoot their own keyframes — e.g. a forearm
-reading `-96°` between keyframes of `-28°` and `-58°`. `apply_bone_pose` and
-`generate_skeletor_tween` now apply changes through a single silent `deserialize()`. Skeletor
-composes the hierarchy at render time, so absolute per-bone writes are correct.
+`SkeletonBone`'s setters propagate their delta to every child, so writing absolute values for a
+parent and its child in one call makes the child accumulate its parent's rotation *if the child is
+written first*. Symptom: tweened frames overshoot their own keyframes — e.g. a forearm reading
+`-96°` between keyframes of `-28°` and `-58°`.
+
+`apply_bone_pose` and `generate_skeletor_tween` now sort their writes **parents-first**, so each
+child's own absolute value lands last and wins.
+
+> **Do not fix this by suppressing propagation.** `deserialize(data, true)` sets
+> `should_update_silently`, which makes the setter pass `should_propagate = false` —
+> and that propagation *is* the kinematic chain. Alongside adding the rotation to each child,
+> `update_bone_property` orbits every child's `start_point` around its parent:
+>
+> ```gdscript
+> if _bone_set.has(bone_name) and property == "bone_rotation":
+>     var displacement := rel_to_start_point(child_bone.rel_to_canvas(child_bone.start_point))
+>     displacement = displacement.rotated(diff)
+>     child_bone.start_point = child_bone.rel_to_origin(rel_to_canvas(start_point) + displacement)
+> ```
+>
+> Silence it and every child's pivot stays put while its parent swings away — forearms detach
+> from elbows, feet from ankles. Skeletor bakes the hierarchy into `start_point` at write time; it
+> does **not** compose it at render time. Ordering is the fix, not silence.
 
 #### `import_skeleton_animation` says a bone was skipped
 Bones are matched by **name**. A bone present in the file but not in the target rig is skipped and
